@@ -2,8 +2,6 @@
 
 [中文版](README.md) | [英文版](README_EN.md)
 
-<img src="Android-APP/design/assets/zcode-app-icon.png" width="88" alt="ZCode Proxy 图标" />
-
 # ZCode Proxy
 
 **把你的 GLM 编码套餐，接进所有 AI 编程工具。**
@@ -12,7 +10,7 @@
 本来只能在官方客户端里用，ZCode Proxy 在本机把它变成标准的 OpenAI / Anthropic 接口，
 于是 Claude Code、Codex、Silly Tavern ……都能直接用上你的套餐额度。
 
-[快速上手](#-一分钟上手) · [接入编码工具](#-把编码工具接上来) · [手机版](#-手机版-android) · [常见问题](#-常见问题)
+[快速上手](#-一分钟上手) · [接入编码工具](#-把编码工具接上来) · [常见问题](#-常见问题)
 
 </div>
 
@@ -21,47 +19,38 @@
 ## 它能帮你做什么
 
 - 🧩 **一个地址，三种格式** —— OpenAI、Anthropic、Responses（Codex 专用）接口都在本机 `127.0.0.1:8080` 上，工具认哪种就给它哪种。
-- 🖥️ **带图形面板** —— 终端启动就是一块可视化面板（也可纯后台运行），启动、登录、看日志点点就行，还能用手机管理。
-- 📱 **安卓 App** —— 手机上启动/停止代理、看实时日志、切换服务商，出门在外也好用。
-- 💬 **自带网页聊天** —— 打开 `/webui` 就是一个本地 ChatGPT 风格聊天页，随手测试模型。
+- 🖥️ **带网页面板** —— 启动后在浏览器里管理：账号、路由策略、额度、实时日志、设置。面板和代理共用一个端口，首次启动打印一次管理员密码；绑定地址默认跟随代理，想只给本机就把 `panel.host` 设成 `127.0.0.1`。
+- 💬 **自带网页聊天**：面板侧栏的「聊天」视图就是一个本地 ChatGPT 风格聊天页，随手测试模型——不用另开端口，也不用记第二个地址。
 - 🌙 **闲时通道 & 套餐秒抢**（可选）—— 错峰时段的免费额度通道、限量体验套餐自动领取，都是内置功能。
-- 🔌 **套餐内 MCP 聚合端点** —— ZCode 官方插件 MCP（天眼查 / Wind / 同花顺 iFinD…，134+ 工具）聚合到**单一** `/mcp` 端点（streamable HTTP，工具名 `{plugin}__{tool}` 命名空间化——客户端只配一个 MCP server 即可，需 coding-plan 登录，浏览器 `GET /mcp` 查看目录）；自带网页聊天还能外挂你自己的 MCP 服务器给模型当工具用。
+- 🔌 **套餐内 MCP 聚合端点** —— ZCode 官方插件 MCP（天眼查 / Wind / 同花顺 iFinD…）聚合到**单一** `/mcp` 端点（streamable HTTP，工具名 `{plugin}__{tool}` 命名空间化——客户端只配一个 MCP server 即可，需 coding-plan 登录，浏览器 `GET /mcp` 查看目录）。
 - 🪟 **全平台** —— Windows / macOS / Linux 一份代码直接跑，也能编译成单文件程序或 Docker 部署。
 
 ## 🚀 一分钟上手
 
-### 第 1 步：从[GitHub Releases](https://github.com/TriDefender/zcode-api/releases)下载最新版本的exe
+### 第 1 步：从[GitHub Releases](https://github.com/awsl1414/zcode-api/releases)下载最新版本的exe
 
 没错，这就完了，就是这么简单
 
-启动后进入终端控制面板（这就是主界面）：
+启动后代理直接跑起来，并在终端打印面板地址与一次性的管理员密码（同时在有桌面会话时打开浏览器）：
 
-<img src="docs/images/tui-annotated.png" alt="ZCode Proxy 终端控制面板" width="980" />
+```text
+zcode-proxy listening on http://127.0.0.1:8080
+panel: http://127.0.0.1:8080/
+panel: admin password (shown once, change it in Settings):
+        Xk9mP2vL8nQ4wR7t
+```
 
-面板四块卡：**登录与设置**（服务商 / 套餐 / 登录）、**套餐用量**（余量占比条 + 重置倒计时，按 <kbd>r</kbd> 或点 Refresh 刷新）、**代理服务**（启动停止 / 当前配置）、**日志**（每个请求一行，实时滚动）。按 <kbd>s</kbd> 启动代理，看到 `Status: running` 就绪了。
+面板和代理共用 8080，打开就是登录页：用户名 `admin`，密码是上面那行。登录之后可在设置页改密码。
 
-> 用不惯键盘快捷键？面板上的按钮支持**鼠标点击**。想让它在后台静默运行？`zcode-proxy.exe --cli serve`。
+面板的侧栏有八个视图：**概览**（代理状态 / 端口 / 在飞数 / 风控告警）、**统计**（用量聚合与 365 天热力图）、**账号**（账号表、添加 / 编辑 / 启停 / 删除，全部热生效）、**路由策略**（order / mode / strategy / 粘性 / 风控开关）、**API key**、**日志**（SSE 实时流、按账号与级别过滤、搜索）、**设置**（登录 / 登出、检查更新、改密码、逐字段写回 `config.yaml`）、**聊天**。出口代理表不占单独页面，是账号页里的抽屉。聊天是侧栏里的一个视图，不是独立页面。面板里没有「启停代理」的按钮：它和代理共用一个监听，关掉等于把自己也关掉，停服务用 Ctrl+C / 进程管理器。
 
-### 面板快捷键
-
-| 按键 | 作用 |
-|------|------|
-| <kbd>s</kbd> | 启动 / 停止代理 |
-| <kbd>l</kbd> | 登录当前服务商（打开浏览器授权） |
-| <kbd>L</kbd> | bigmodel 粘贴登录（回退模式；`l` 登录本身就免回调，无头可用） |
-| <kbd>o</kbd> | 退出登录 |
-| <kbd>p</kbd> / <kbd>t</kbd> | 切换服务商（Z.AI ↔ 智谱）/ 套餐（coding-plan ↔ start-plan） |
-| <kbd>r</kbd> | 刷新套餐用量 |
-| <kbd>u</kbd> | 手动重查新版本（更新提示） |
-| <kbd>↑</kbd><kbd>↓</kbd> / <kbd>PgUp</kbd> / <kbd>g</kbd> | 滚动日志 / 回到底部 |
-| <kbd>c</kbd> | 清屏日志 |
-| <kbd>q</kbd> | 退出面板 |
+> 想纯后台静默运行（无浏览器 / 无 TTY）：`zcode-proxy --cli serve`。`--no-panel` 只关面板、代理照跑，适合已经配好账号的机器；容器里别用，面板是建账号、建 API key 的入口。旧的终端 TUI 已在 5.0 移除，`zcode-proxy tui` 会明确报错。
 
 ## 🔌 把编码工具接上来
 
 代理启动后，本机地址就是 **`http://127.0.0.1:8080`**。你的工具只需要改两样东西：**接口地址**和**模型名**。
 
-关于「API Key」：如果你在配置里设置过 `auth.proxyApiKey`（或环境变量 `ZCODE_PROXY_API_KEY`），工具里就填同一个值；没设置的话随便填（如 `sk-1234`），本机自用不校验。
+关于「API Key」：在面板的「API key」页（`/keys`）给每个程序建一把，工具里填那一把，只显示一次。还没建 key 时数据面不校验，随便填（如 `sk-1234`）即可。
 
 <details>
 <summary><b>Claude Code</b>（点开看配置）</summary>
@@ -117,7 +106,7 @@ Anthropic 格式的工具（如某些 Claude 客户端）地址填 `http://127.0
 
 </details>
 
-想先手动试一下？打开 **http://127.0.0.1:8080/webui** 就有自带聊天页；或者用 curl：
+想先手动试一下？登录面板后点侧栏的「聊天」，或者用 curl：
 
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" -d '{
@@ -126,96 +115,107 @@ curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/jso
 }'
 ```
 
-## 📱 手机版 (Android)
-
-从 [GitHub Releases](https://github.com/TriDefender/zcode-api/releases) 下载最新的 `apk` 安装即可。
-App 与电脑版功能对应：一键启动代理、扫码级简单配置、实时日志、切换服务商与套餐、亮暗双主题。
-
-| 主页 | 日志 | 设置 | 暗色主题 |
-|:-:|:-:|:-:|:-:|
-| <img src="docs/images/android/home-light.png" width="210" alt="主页" /> | <img src="docs/images/android/logs.png" width="210" alt="日志" /> | <img src="docs/images/android/settings.png" width="210" alt="设置" /> | <img src="docs/images/android/home-dark.png" width="210" alt="暗色主题" /> |
-
-手机和电脑跑的是同一套核心：App 内置了完整的代理引擎，**手机本身就是一个独立的代理服务器**，局域网内的电脑也可以连手机上的代理地址一起用。
-
 <details>
 <summary><b>Docker 部署</b></summary>
 
-```bash
-# 在宿主机上用固定加密种子登录（两种服务商都免本机回调：链接在任何设备打开即可，登录自动完成）
-ZCODE_PROXY_CREDENTIAL_SECRET="一串只有你知道的口令" \
-  bun run src/index.ts auth login zai
+镜像多架构（amd64 / arm64），以 `bun` 用户运行。多阶段构建后的运行层仅带应用 bundle 和验证码 worker，不带 `node_modules`、源码、测试或额外构建工具，保留完整功能。面板挂在代理自己的监听上，一个端口服务所有，所以只映射 `8080`。
 
-docker run -d --name zcode-proxy -p 8080:8080 \
-  -v "$(pwd)/config.yaml:/data/config.yaml:ro" \
-  -v "$(HOME)/.zcode-proxy/credentials.json:/home/bun/.zcode-proxy/credentials.json:ro" \
-  -e ZCODE_PROXY_CREDENTIAL_SECRET="一串只有你知道的口令" \
-  ghcr.io/tridefender/zcode-proxy:latest
+```bash
+mkdir -p data                        # Docker 会以 root 创建不存在的挂载目录，而容器以 uid 1000 运行
+docker compose up -d                  # 仓库根目录的 docker-compose.yml，先把种子换成固定随机串
+docker compose logs zcode-proxy       # 找管理员密码那一行
 ```
 
-镜像多架构（amd64 / arm64），以 `bun` 用户运行。多阶段构建后的运行层仅带应用 bundle 和验证码 worker，不带 `node_modules`、源码、测试或额外构建工具，保留完整功能。compose 写法：
+首次启动的日志长这样（密码只打印这一次，在面板里改过就不会再出现）：
+
+```text
+Created /data/config.yaml from bundled template.
+Run: zcode-proxy auth login <zai|bigmodel>
+
+No account yet. Open the panel to add one, or run:
+  zcode-proxy auth login zai|bigmodel
+  zcode-proxy auth import [--jwt <token>]
+panel: admin password (shown once, change it in Settings):
+        Xk9mP2vL8nQ4wR7t
+zcode-proxy listening on http://0.0.0.0:8080
+panel: http://127.0.0.1:8080/
+09:41:07 W [panel] panel reachable on a non-loopback address: anyone who reaches this port and signs in can log out, change settings, or shut down host=0.0.0.0
+  models: 2 available
+  /async/v1/*: ON        # 只有开了 async.enabled 才会出现
+```
+
+`panel: http://127.0.0.1:8080/` 那行是回环地址，只在宿主机的浏览器里点得开；从这里或局域网访问用 `http://<宿主机>:8080/`。
+
+打开 `http://<宿主机>:8080/`，用户名 `admin` 加那行密码登录，然后：
+
+1. 在「账号」页添加账号（面板里走登录流程，或导入已有凭据）。没有账号时代理照样启动，请求会按 `no-account` 回 503。
+2. 在「API key」页建一把 key 填给客户端。建第一把之前数据面不校验，随便填也行。
+
+不想写 compose 文件也可以：
+
+```bash
+mkdir -p data
+docker run -d --name zcode-proxy -p 8080:8080 \
+  -v "$(pwd)/data:/data" \
+  -e ZCODE_PROXY_CREDENTIAL_SECRET="一串只有你知道的固定随机串" \
+  ghcr.io/awsl1414/zcode-proxy:latest
+```
+
+compose 文件（仓库里的 `docker-compose.yml` 就是这个）：
 
 ```yaml
 services:
   zcode-proxy:
-    image: ghcr.io/tridefender/zcode-proxy:latest
-    ports: ["8080:8080"]
+    image: ghcr.io/awsl1414/zcode-proxy:latest
+    ports:
+      - "8080:8080"
     volumes:
-      - ./config.yaml:/data/config.yaml:ro
-      - ./credentials.json:/home/bun/.zcode-proxy/credentials.json:ro
+      - ./data:/data
     environment:
-      ZCODE_PROXY_CREDENTIAL_SECRET: "一串只有你知道的口令"
+      # 账号文件的加密种子。改它等于丢失所有已导入的账号。
+      ZCODE_PROXY_CREDENTIAL_SECRET: "换成一串固定的随机字符"
     restart: unless-stopped
 ```
+
+`./data` 是整个安装的存储目录：`config.yaml`（首次启动自动生成）、`accounts.json`、`apikeys.json`、`users.json`、`policy.json`，以及运行期写出的 `requests.jsonl`（请求记录）、`activities.jsonl`（抢活动台账）与 `control.port`。备份、换机器、迁移都只拷这一个目录。
+
+挂载目录要先建：不存在时由 Docker 以 root 建，而容器以 uid 1000（镜像里的 `bun` 用户）运行，写 `config.yaml` 会直接报权限错误。宿主机第一个用户不是 uid 1000 时，改成 `mkdir -p data && sudo chown 1000:1000 data`。
+
+`ZCODE_PROXY_CREDENTIAL_SECRET` 是这几个文件的加密种子，定了就别改：换一个值等于让已导入的账号与新写的 key 全部解不开。它不进 `config.yaml`，因为那等于把密钥明文存进配置文件。
+
+端口在 `data/config.yaml` 的 `server.port`（模板默认 8080）。改端口要同时改 compose 的 `ports`，容器内的监听跟着 YAML 走。容器自带 `HEALTHCHECK`，探针打 `/healthz`（控制面的无鉴权路径，建了 API key 也不会 401）；用 `--no-panel` 启动时这个路径没有响应，容器会显示 unhealthy。
 
 </details>
 
 <details>
 <summary><b>可调的配置与环境变量</b>（改不改都能跑）</summary>
 
-配置文件是项目根目录的 `config.yaml`（首次启动自动生成，完整注释见 [`config.example.yaml`](config.example.yaml)），环境变量优先级更高。常用的：
+配置文件是进程当前目录下的 `config.yaml`（首次启动自动生成，完整注释见 [`config.example.yaml`](config.example.yaml)）；容器里由 `ZCODE_PROXY_CONFIG` 指到 `/data/config.yaml`。**配置只有一个入口：`config.yaml`，或者面板的设置页**（面板写回的就是这个文件）。环境变量用于进程级覆盖，不参与用户配置，所以改端口、开关、端点这类事都在 `config.yaml` 里做。
+
+运行时会读的环境变量，都不是用户配置：
 
 | 环境变量 | 默认 | 说明 |
 |----------|------|------|
-| `ZCODE_PROXY_PORT` | `8080` | 监听端口 |
-| `ZCODE_PROXY_API_KEY` | 无 | 客户端访问代理用的密钥（不设=不校验） |
-| `ZCODE_PROVIDER` | `zai` | 服务商 `zai` / `bigmodel` |
-| `ZCODE_PROXY_CONFIG` | `config.yaml` | 配置文件路径 |
-| `ZCODE_PROXY_CREDENTIAL_SECRET` | 机器相关 | 登录凭据的加密种子（跨机器迁移/Docker 时需要固定它） |
-| `ZCODE_LOG_FORMAT` | 桌面表格 | 设为 `compact` 可得到单行日志（适合窄屏） |
-| `ZCODE_PANEL_ENABLED` | 关 | 设为 `1`/`true` 后，无界面的 `serve` 模式（含 Docker）额外启动一个本机 Web 面板 |
-| `ZCODE_PANEL_TOKEN` | 无 | 面板的访问令牌，**开启面板时必填**（不填则面板不启动，避免裸奔的控制接口） |
-| `ZCODE_PANEL_PORT` | `8090` | 面板端口 |
-| `ZCODE_PANEL_HOST` | `127.0.0.1` | 面板监听地址。Docker bridge 网络下 `-p` 映射不到容器回环，可设 `0.0.0.0`；此时**必须配强 token，且不要把端口暴露到公网** |
-| `ZCODE_UPDATE_CHECK` | 开 | 设为 `off`/`0` 关闭启动时的「有新版」检查（只提示，不自动更新） |
-| `ZCODE_UPDATE_SKIP` | 无 | 逗号分隔要忽略的版本，如 `v4.7.6,v4.7.7` |
+| `ZCODE_PROXY_CONFIG` | `config.yaml` | 配置文件路径（启动参数，此时还不知道 YAML 在哪；镜像里是 `/data/config.yaml`） |
+| `ZCODE_PROXY_STORE_DIR` | `~/.zcode-proxy` | 存储目录：账号、API key、控制面用户、账号策略都写在这里（镜像里是 `/data`） |
+| `ZCODE_PROXY_CREDENTIAL_SECRET` | 机器相关 | 那几个存储文件的加密种子（跨机器迁移/Docker 时需要固定它） |
+| `ZCODE_LOG_FORMAT` | 桌面表格 | 设为 `compact` 可得单行日志（适合窄屏与 `docker logs`，镜像里默认就是） |
+| `ZCODE_ENV` | 生产 | 设为 `test` 时把客户端的 release channel 报成 test；桌面场景不用管 |
+| `ZCODE_UPDATE_CHECK` / `ZCODE_UPDATE_SKIP` | 开 / 无 | 关掉「有新版」检查 / 逗号分隔要忽略的版本，如 `v5.0.0,v5.0.1` |
+| `HTTP_PROXY` / `HTTPS_PROXY` | 无 | 系统代理，验证码求解与出线请求会走它 |
+| `CAPTCHA_POOL_MAX` / `CAPTCHA_SOLVE_CONCURRENCY` / `CAPTCHA_CPU_LIMIT_PCT` | `60` / `3` / `100` | 验证码池的上限、求解并发、CPU 占用上限（低端机往下调） |
 
-套餐类型（`plan`: `coding-plan` 个人套餐 / `start-plan` 体验套餐）在面板里按 <kbd>t</kbd> 切换，会写回 config.yaml。
+另外几个是进程级覆盖，桌面部署通常不用管：`ZCODE_IDENTITY_*`（显式覆盖出站身份头，默认取本机真实值）、`ZCODE_DUMP_UPSTREAM` / `CAPTCHA_DEBUG` / `CAPTCHA_DEBUG_BODIES`（排障）、`CAPTCHA_ACQUIRE_BUDGET_MS` / `CAPTCHA_CONFIG_TIMEOUT_MS` / `CAPTCHA_CONFIG_TTL_MS`（验证码取配置与重试预算，默认 45s / 15s / 1h）、`ZCODE_CAPTCHA_WORKER` / `ZCODE_CAPTCHA_WARM_WORKERS`（编译产物里的 worker 路径与预热池大小）、`MCP_AGGREGATE_TOOLS_TTL_MS`（`/mcp` 工具缓存，默认 5 分钟）、`ZCODE_OAUTH_PASTE`（等价于 `auth login --paste`）。
 
-服务器这类没有 TUI 的场景，可以让浏览器来看：设 `ZCODE_PANEL_ENABLED=1`、`ZCODE_PANEL_TOKEN=<一段你自己的随机串>` 后启动，再用 SSH 端口转发打开 `http://127.0.0.1:8090` —— 能看状态和额度、切服务商/套餐、登录登出、看实时日志和 MCP 列表。面板默认只绑回环（`ZCODE_PANEL_HOST` 可改绑地址，见下）、每次调 API 都要带 token，没有 token 不启动；命令走进程内分发，不会再额外开一个控制端口。面板上的「Stop proxy」只停代理，进程本身仍能正常退出（SIGTERM/SIGINT 和面板的 shutdown 都会先清掉后台定时器——自动领取、验证码池——再退出）；在面板里登出会同时清掉运行中的凭据并停掉代理，避免登出后新请求还继续花旧账号的额度。
+套餐类型（`plan`: `coding-plan` 个人套餐 / `start-plan` 体验套餐）是**账号**的属性：导入凭据时按凭据与订阅得出，进程级策略不覆盖它。所以换套餐就是换账号：`zcode-proxy auth account` 命令族或面板的「账号」页删除重建，重新导入后立即生效。
 
-**有新版提示**：`serve` 和 TUI 启动时会异步向 GitHub 查一次 latest release，最多多打一行日志（TUI 里按 <kbd>u</kbd> 可手动重查），不阻塞启动、不影响代理；离线、被挡、限流或返回格式变了都一律静默忽略。手动检查总会给你明确答复（「已是最新」或「检查不可用」）。容器里镜像是不可变的，所以提示给的是**当前运行时的拉取命令**（Docker 为 `docker compose pull && docker compose up -d`，Podman 为 `podman compose pull && podman compose up -d`；认不出运行时则只说「拉取新镜像后重建容器」），而不是自己去替换文件（release 目前也没有校验和，所以不做自动下载替换）。不想让它查就设 `ZCODE_UPDATE_CHECK=off`，某个版本太吵可以 `ZCODE_UPDATE_SKIP=v4.7.6` 忽略。
+面板默认就开着，和代理**同一个端口**（`config.yaml` 的 `panel.enabled` 开关、`panel.host` 改绑定地址，`--no-panel` 只影响这一次启动）。面板能看状态与额度、管理账号、改路由策略、登录登出、看实时日志（MCP 目录在数据面的 `GET /mcp`，不在面板里）。访问走登录页：首次启动会在终端打印一次管理员密码（用户名 `admin`），登录后可在设置页修改，会话存在服务端、12 小时滑动续期。命令走进程内分发，不会再额外开一个控制端口。SIGTERM/SIGINT 和面板的 shutdown 都会先清掉后台定时器（包括自动领取与验证码池），再退出。在面板里登出只结束面板会话，上游账号与凭据不受影响。
 
-**Docker 里怎么连面板**：面板默认只监听**容器自己的** `127.0.0.1`，所以默认 bridge 网络下 `-p 8080:8080` 映射不出来，只补一个 `-p 8090:8090` 也连不上（端口映射到的是容器的非回环地址）。两条路：① 在 environment 里加 `ZCODE_PANEL_HOST=0.0.0.0` 并补 `-p 8090:8090` —— 面板会直接绑到容器所有网卡上，token 必须够强、8090 只放行到真正需要的来源；② Linux 服务器上用 host 网络，让容器直接用宿主机回环：
+**有新版提示**：启动时会异步向 GitHub 查一次 latest release，最多多打一行日志（面板「设置」页可手动重查），不阻塞启动、不影响代理；离线、被挡、限流或返回格式变了都一律静默忽略。手动检查总会给你明确答复（「已是最新」或「检查不可用」）。容器里镜像是不可变的，所以提示给的是**当前运行时的拉取命令**（Docker 为 `docker compose pull && docker compose up -d`，Podman 为 `podman compose pull && podman compose up -d`；认不出运行时则只说「拉取新镜像后重建容器」），而不是自己去替换文件（release 目前也没有校验和，所以不做自动下载替换）。不想让它查就设 `ZCODE_UPDATE_CHECK=off`，某个版本太吵可以 `ZCODE_UPDATE_SKIP=v5.0.0` 忽略。
 
-```yaml
-services:
-  zcode-proxy:
-    # 保留现有 image / volumes / restart 等配置
-    network_mode: host        # host 模式下删掉原来的 ports:
-    environment:
-      ZCODE_PROXY_CREDENTIAL_SECRET: "一串只有你知道的口令"
-      ZCODE_PANEL_ENABLED: "1"
-      ZCODE_PANEL_TOKEN: "${ZCODE_PANEL_TOKEN:?请先在 .env 里设置面板 token}"
-      ZCODE_PANEL_PORT: "8090"
-```
+**Docker 里怎么连面板**：面板挂在代理自己的监听上，所以 `-p 8080:8080` 一个端口就够，打开 `http://<宿主机>:8080/` 就是登录页。管理员密码在首次启动的 `docker logs` 里。密码登录之后，面板与代理共用一个端口、一套会话。
 
-然后在本机建一条只转发的隧道（`-N` 不开 shell）：
-
-```bash
-ssh -N -L 8090:127.0.0.1:8090 user@host
-```
-
-再打开 `http://127.0.0.1:8090`。host 网络下代理主端口也直接占用宿主机端口，安全组/防火墙照旧按原来放行 8080，**不要**对外放行 8090。
+非容器部署想只把控制面留给本机，把 `config.yaml` 里的 `panel.host` 设成 `127.0.0.1`：代理仍绑 `0.0.0.0`，面板只接受本机请求。容器里别这么设，那会让宿主机也连不上面板。
 
 </details>
 
@@ -224,9 +224,9 @@ ssh -N -L 8090:127.0.0.1:8090 user@host
 
 **闲时通道 (`/async/*`)** —— 凌晨等错峰时段官方释放的免费算力通道。请求先排队领票，轮到了自动发给模型（适合不着急的批量任务）。`config.yaml` 里 `async.enabled: true` 打开；注意它一次性、不带会话记忆，多轮对话要把历史放进请求里。
 
-**周末/体验套餐自动领取 (claim)** —— 默认开启。代理每 5 分钟探测一次官方的限量套餐活动页，上新瞬间自动帮你抢（`claim.enabled: false` 可关闭）。手动抢：`bun run src/index.ts claim`。
+**周末/体验套餐自动领取 (claim)** —— 默认开启。代理每 5 分钟探测一次官方的限量套餐活动（`claim.pollIntervalMs`），活动开场前预热、开场瞬间连发；要停后台任务设 `claim.auto: false`，要整块关掉设 `claim.enabled: false`。手动抢：`bun run src/index.ts claim`。
 
-**额度显示 (quota)** —— 登录后面板会自动查一次额度，之后按 <kbd>r</kbd> 手动刷新。数据来自上游两个额度平面：体验/积分制套餐的积分桶（`billing/balance`，剩余 / 总额、到期时间），以及个人编码套餐的用量窗口（`/api/monitor/usage/quota/limit`，与官方用量面板同源，5 小时 / 周窗口的**剩余额度**与重置时间——上游 `number` 不是可与剩余比较的总量，所以与 CLI/TUI 一致只显示剩余，只有上游给出百分比时才画比例条）。命令行直接查：`bun run src/index.ts quota`（对应 HTTP 接口 `GET /quota`）。注意上游网关对频繁查询有限速，所以面板不做定时轮询。
+**额度显示 (quota)** —— 后台按 `accounts.quota.pollSeconds`（默认 300 秒）逐账号采样，启动时另有一轮首轮探测，所以登录之后额度会自己刷新；顶栏刷新按钮与 `r` 键按当前视图触发即时复采。数据来自上游两个额度平面：体验/积分制套餐的积分桶（`billing/balance`，剩余 / 总额、到期时间），以及个人编码套餐的用量窗口（`/api/monitor/usage/quota/limit`，与官方用量面板同源，5 小时 / 周窗口的**剩余额度**与重置时间——上游 `number` 不是可与剩余比较的总量，所以与 CLI 一致只显示剩余，只有上游给出百分比时才画比例条）。命令行直接查：`bun run src/index.ts quota`（对应 HTTP 接口 `GET /quota`）。
 
 </details>
 
@@ -241,20 +241,23 @@ ssh -N -L 8090:127.0.0.1:8090 user@host
 
 ## ❓ 常见问题
 
-**启动就退出，提示 Not logged in？**
-先登录：`bun run src/index.ts auth login zai`（或 bigmodel）。登录一次即可，凭据加密保存。
+**启动后提示 No account yet / 请求回 503？**
+没有账号时代理照样启动，只是请求按 `no-account` 回 503。登录：`bun run src/index.ts auth login zai`（或 bigmodel），或在面板「账号」页添加。登录一次即可，凭据加密保存。
 
 **端口 8080 被占了？**
-环境变量换一个：`ZCODE_PROXY_PORT=8081 bun run src/index.ts`，或改 `config.yaml` 的 `server.port`。
+改 `config.yaml` 的 `server.port`（或在面板设置页改，写回同一个文件）。
 
 **工具一直连不上 / 401？**
-如果你设置过 `ZCODE_PROXY_API_KEY`，工具里必须填同一个值；不设置则免密。注意密钥开启后除 `/webui` 外**所有路由**（包括 `/health`）都要带密钥。
+工具里要填面板「API key」页建的某一把 key。表里一把 key 都没有时数据面不校验，随便填即可；一旦建了 key，除面板自己的会话（浏览器里登录过面板）外**所有路由**（包括 `/health`）都要带它，被禁用的 key 与填错的 key 一样收到 401。
 
 **换电脑 / 重装系统后要重新登录吗？**
-要。凭据加密时绑定了本机信息。跨机器迁移可以两边都设 `ZCODE_PROXY_CREDENTIAL_SECRET` 为同一个值再登录/拷贝 `~/.zcode-proxy/credentials.json`。
+要。凭据加密时绑定了本机信息。跨机器迁移可以两边都设 `ZCODE_PROXY_CREDENTIAL_SECRET` 为同一个值，再把 `~/.zcode-proxy/` 整个目录拷过去（账号、key、控制面用户都在里面）。
 
 **服务器上没有浏览器怎么登录？**
 直接登录即可：`bun run src/index.ts auth login zai`（或 bigmodel）。登录链接在任何设备的浏览器打开都行，授权后本机自动完成（无需回调页面）。若想手动交换，也有粘贴模式：`auth login bigmodel --paste`，把跳转后的完整网址粘回来即可。
+
+**已经在 ZCode 客户端登录过，还要重新授权吗？**
+不用。`bun run src/index.ts auth import` 会读 `~/.zcode/v2/credentials.json`，用里面的 OAuth token 换出编码套餐的 API Key，并把套餐 JWT 一并导入；换不出来时留下的 JWT 只够跑体验套餐（start-plan）、查额度和领套餐，MCP、闲时通道、加速卡还需要编码套餐密钥。手里只有 JWT 就粘：`auth import --jwt <token>`。导入不做续期，凭据失效后重新导入或重新登录即可。
 
 **它在后台到底做了什么？**
 它就是一个"翻译官 + 传话员"：把你的工具发出的标准请求翻译成官方客户端的同款请求转发上去，再把回复原样翻译回来。所有流量都只在你本机和官方服务器之间，不经过任何第三方。
@@ -269,13 +272,20 @@ bun run dev         # 开发模式启动面板
 
 架构与实现细节见 [`src/`](src/) 下各源码文件内的注释。
 
+### CI 与发版
+
+- **CI 必过**：`.github/workflows/ci.yml` 在每个 PR 与 master 直推上跑（类型检查 + 测试 + 面板拼装冒烟）。分支保护（Settings → Branches → Branch protection rules）把 `test` / `panel-build` 两个 check 设为 required，不绿不合并。
+- **发版手动触发**：`.github/workflows/release.yml` 只由 Actions 页面手动 dispatch（输入 tag，如 `v5.0.0`），流程：verify → 版本号自动写回 `package.json` / `src/version.ts` → 五平台二进制全部进同一个 Release（changelog 由 GitHub 按提交自动生成，tag 含 alpha/beta/rc 自动标 prerelease）。
+- **依赖周更**：`.github/dependabot.yml` 每周为 GitHub Actions 与 bun 依赖提升级 PR（新发布版本有 7 天冷却期）。
+
 ## Privacy
 
 本代理完全本地运行：**无遥测、无分析、无任何形式的外发报告**。你的使用数据、设备信息与配置不会离开本机；debug/dump 日志会自动脱敏 API key、JWT 与 proxy key。
 
 ## License
 
-Copyright (c) 2026 TriDefender and the ZCode Proxy contributors.
+Copyright (c) 2026 awsl1414 and the ZCode Proxy contributors.
+Based on ZCode Proxy by TriDefender and contributors.
 
 本项目采用 **[CC BY-NC-SA 4.0（署名—非商业性使用—相同方式共享 4.0 国际）](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh-hans)**。[LICENSE](LICENSE) 收录未经修改的官方标准全文；文件开头为项目的版权与许可声明。
 

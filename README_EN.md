@@ -2,8 +2,6 @@
 
 [中文版](README.md) | [英文版](README_EN.md)
 
-<img src="Android-APP/design/assets/zcode-app-icon.png" width="88" alt="ZCode Proxy icon" />
-
 # ZCode Proxy
 
 **Plug your GLM coding plan into every AI coding tool.**
@@ -13,7 +11,7 @@ A small utility that runs on your own computer. Coding plans from Z.AI / Bigmode
 turns them into standard OpenAI / Anthropic APIs on your machine, so Claude Code,
 Codex, Silly Tavern … can all use your plan quota directly.
 
-[Quick Start](#-quick-start) · [Connect Your Tools](#-connect-your-coding-tools) · [Android App](#-mobile-android) · [FAQ](#-faq)
+[Quick Start](#-quick-start) · [Connect Your Tools](#-connect-your-coding-tools) · [FAQ](#-faq)
 
 </div>
 
@@ -22,47 +20,38 @@ Codex, Silly Tavern … can all use your plan quota directly.
 ## What You Get
 
 - 🧩 **One endpoint, three formats** — OpenAI, Anthropic and Responses (Codex-specific) APIs are all served on local `127.0.0.1:8080`; give each tool whichever format it speaks.
-- 🖥️ **Built-in dashboard** — launching in a terminal gives you a visual panel (headless mode also available); start the proxy, log in and watch logs with simple keypresses, even manageable from your phone.
-- 📱 **Android app** — start/stop the proxy, watch live logs and switch providers on your phone, handy when you're away.
-- 💬 **Web chat included** — open `/webui` for a local ChatGPT-style chat page to try out models.
+- 🖥️ **Built-in web dashboard** — after launch, manage everything in the browser: accounts, routing policy, quota, live logs, settings. The panel shares the proxy's port, prints an admin password once on the first start, and follows the proxy's bind address by default; set `panel.host` to `127.0.0.1` to keep it local.
+- 💬 **Web chat included** — the panel's sidebar "Chat" view is a local ChatGPT-style chat page for trying out models; no extra port, no second address.
 - 🌙 **Off-peak channel & plan grabber** (optional) — a free-quota channel for off-peak hours and automatic claiming of limited trial plans are both built in.
-- 🔌 **In-plan MCP aggregate endpoint** — official ZCode plugin MCPs (Tianyancha / Wind / iFinD…, 134+ tools) are merged behind a **single** `/mcp` endpoint (streamable HTTP, tools namespaced `{plugin}__{tool}` — clients configure just one MCP server; requires a coding-plan login, `GET /mcp` in a browser shows the catalogue); the built-in web chat can also attach your own MCP servers as tools for the model.
+- 🔌 **In-plan MCP aggregate endpoint** — official ZCode plugin MCPs (Tianyancha / Wind / iFinD…) are merged behind a **single** `/mcp` endpoint (streamable HTTP, tools namespaced `{plugin}__{tool}` — clients configure just one MCP server; requires a coding-plan login, `GET /mcp` in a browser shows the catalogue).
 - 🪟 **Cross-platform** — Windows / macOS / Linux run from one codebase; can also be compiled into a single-file executable or deployed with Docker.
 
 ## 🚀 Quick Start
 
-### Step 1: download the latest exe from [GitHub Releases](https://github.com/TriDefender/zcode-api/releases)
+### Step 1: download the latest exe from [GitHub Releases](https://github.com/awsl1414/zcode-api/releases)
 
 Yep, that's it. It really is that simple.
 
-After launching, you'll land in the terminal control panel (this is the main UI):
+The proxy starts right away and prints the panel address plus a one-time admin password (it also opens your browser when there is a desktop session):
 
-<img src="docs/images/tui-annotated.png" alt="ZCode Proxy terminal control panel" width="980" />
+```text
+zcode-proxy listening on http://127.0.0.1:8080
+panel: http://127.0.0.1:8080/
+panel: admin password (shown once, change it in Settings):
+        Xk9mP2vL8nQ4wR7t
+```
 
-The panel has four cards: **Login & Settings** (provider / plan / login), **Quota** (remaining-share bars + reset countdowns, press <kbd>r</kbd> or click Refresh), **Proxy Service** (start/stop, current config) and **Logs** (one line per request, scrolling live). Press <kbd>s</kbd> to start the proxy — once you see `Status: running`, you're ready.
+The panel shares port 8080 with the proxy; opening it gives you the login page (user `admin`, the password above). Change it in Settings once signed in.
 
-> Not fond of keyboard shortcuts? The panel buttons support **mouse clicks**. Want it to run silently in the background? Use `zcode-proxy.exe --cli serve`.
+The panel's sidebar has eight views: **Overview** (proxy state / port / in-flight / risk alerts), **Stats** (usage aggregates and a 365-day heatmap), **Accounts** (the account table plus add / edit / enable / disable / remove, all hot), **Routing** (order / mode / strategy / stickiness / risk switches), **API keys**, **Logs** (SSE stream, filters by account and level, search), **Settings** (login / logout, update check, password change, per-field writes back to `config.yaml`) and **Chat**. The egress proxy table is not a page of its own: it lives in a drawer on the Accounts view. Chat is a sidebar view, not its own page. There is no start-stop-proxy button in the panel: it shares the proxy's listener, so stopping it there would stop the panel too — stop the process with Ctrl+C or your process manager.
 
-### Panel Shortcuts
-
-| Key | Action |
-|------|------|
-| <kbd>s</kbd> | Start / stop the proxy |
-| <kbd>l</kbd> | Log in to the current provider (opens the browser for authorization) |
-| <kbd>L</kbd> | bigmodel paste login (fallback mode; the `l` login itself is callback-free and works headless) |
-| <kbd>o</kbd> | Log out |
-| <kbd>p</kbd> / <kbd>t</kbd> | Switch provider (Z.AI ↔ Zhipu) / plan (coding-plan ↔ start-plan) |
-| <kbd>r</kbd> | Refresh the quota card |
-| <kbd>u</kbd> | Re-check for updates manually (update notice) |
-| <kbd>↑</kbd><kbd>↓</kbd> / <kbd>PgUp</kbd> / <kbd>g</kbd> | Scroll logs / jump back to the bottom |
-| <kbd>c</kbd> | Clear the log screen |
-| <kbd>q</kbd> | Quit the panel |
+> Want a purely headless run (no browser / no TTY)? Use `zcode-proxy --cli serve`. `--no-panel` turns off the panel and keeps the proxy running, which suits a machine whose accounts are already set up; do not use it in a container, where the panel is how accounts and API keys get created. The old terminal TUI was removed in 5.0; `zcode-proxy tui` now fails with an explicit error.
 
 ## 🔌 Connect Your Coding Tools
 
 Once the proxy is running, the local address is **`http://127.0.0.1:8080`**. Your tools only need two changes: the **API endpoint** and the **model name**.
 
-About the "API Key": if you've set `auth.proxyApiKey` in the config (or the environment variable `ZCODE_PROXY_API_KEY`), enter the same value in your tool; if not set, enter anything (e.g. `sk-1234`) — purely local use involves no verification.
+About the "API Key": create one key per client on the panel's API keys page (`/keys`) and paste it into your tool — it is shown once. While no key exists yet the data plane does not verify, so anything (e.g. `sk-1234`) works.
 
 <details>
 <summary><b>Claude Code</b> (click to expand)</summary>
@@ -118,7 +107,7 @@ Anthropic-format tools (e.g. some Claude clients) should use `http://127.0.0.1:8
 
 </details>
 
-Want to try it manually first? Open **http://127.0.0.1:8080/webui** for the built-in chat page, or use curl:
+Want to try it manually first? Sign in to the panel and open the sidebar's "Chat" view, or use curl:
 
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" -d '{
@@ -127,96 +116,107 @@ curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/jso
 }'
 ```
 
-## 📱 Mobile (Android)
-
-Download the latest `apk` from [GitHub Releases](https://github.com/TriDefender/zcode-api/releases) and install it. The app mirrors the desktop features: one-tap proxy start, QR-simple configuration, live logs, provider & plan switching, and light/dark themes.
-
-| Home | Logs | Settings | Dark theme |
-|:-:|:-:|:-:|:-:|
-| <img src="docs/images/android/home-light.png" width="210" alt="Home" /> | <img src="docs/images/android/logs.png" width="210" alt="Logs" /> | <img src="docs/images/android/settings.png" width="210" alt="Settings" /> | <img src="docs/images/android/home-dark.png" width="210" alt="Dark theme" /> |
-
-The phone and desktop run the same core: the app embeds the full proxy engine, so **the phone itself is a standalone proxy server** — computers on the same LAN can also connect to the proxy address on your phone.
-
 <details>
 <summary><b>Docker Deployment</b></summary>
 
-```bash
-# Log in on the host with a fixed encryption seed (both providers skip the local callback:
-# open the link on any device and the login completes automatically)
-ZCODE_PROXY_CREDENTIAL_SECRET="a-passphrase-only-you-know" \
-  bun run src/index.ts auth login zai
+The image is multi-arch (amd64 / arm64) and runs as the `bun` user. Its multi-stage build ships only the application bundle and captcha worker, with all features retained and no `node_modules`, sources, tests, or additional build tools in the runtime layer. The panel is mounted on the proxy's own listener, so publishing `8080` is enough.
 
-docker run -d --name zcode-proxy -p 8080:8080 \
-  -v "$(pwd)/config.yaml:/data/config.yaml:ro" \
-  -v "$(HOME)/.zcode-proxy/credentials.json:/home/bun/.zcode-proxy/credentials.json:ro" \
-  -e ZCODE_PROXY_CREDENTIAL_SECRET="a-passphrase-only-you-know" \
-  ghcr.io/tridefender/zcode-proxy:latest
+```bash
+mkdir -p data                        # Docker creates a missing mount dir as root; the container runs as uid 1000
+docker compose up -d                  # docker-compose.yml in the repo root; replace the seed first
+docker compose logs zcode-proxy       # find the admin password line
 ```
 
-The image is multi-arch (amd64 / arm64) and runs as the `bun` user. Its multi-stage build ships only the application bundle and captcha worker, with all features retained and no `node_modules`, sources, tests, or additional build tools in the runtime layer. With compose:
+The first start looks like this (the password is printed once; after you change it in the panel it never appears again):
+
+```text
+Created /data/config.yaml from bundled template.
+Run: zcode-proxy auth login <zai|bigmodel>
+
+No account yet. Open the panel to add one, or run:
+  zcode-proxy auth login zai|bigmodel
+  zcode-proxy auth import [--jwt <token>]
+panel: admin password (shown once, change it in Settings):
+        Xk9mP2vL8nQ4wR7t
+zcode-proxy listening on http://0.0.0.0:8080
+panel: http://127.0.0.1:8080/
+09:41:07 W [panel] panel reachable on a non-loopback address: anyone who reaches this port and signs in can log out, change settings, or shut down host=0.0.0.0
+  models: 2 available
+  /async/v1/*: ON        # only printed when async.enabled is on
+```
+
+The `panel: http://127.0.0.1:8080/` line is a loopback address, which only opens in a browser on the Docker host; from elsewhere use `http://<host>:8080/`.
+
+Open `http://<host>:8080/`, sign in as `admin` with that password, then:
+
+1. Add an account on the **Accounts** page (log in to Z.AI / bigmodel there, or import an existing credential). The proxy starts without any account; requests answer 503 `no-account` until one exists.
+2. Create a key on the **API keys** page and paste it into your clients. Before the first key exists the data plane does not verify, so anything works in the meantime.
+
+No compose file needed either:
+
+```bash
+mkdir -p data
+docker run -d --name zcode-proxy -p 8080:8080 \
+  -v "$(pwd)/data:/data" \
+  -e ZCODE_PROXY_CREDENTIAL_SECRET="a-fixed-random-string-only-you-know" \
+  ghcr.io/awsl1414/zcode-proxy:latest
+```
+
+The compose file (this is `docker-compose.yml` in the repo):
 
 ```yaml
 services:
   zcode-proxy:
-    image: ghcr.io/tridefender/zcode-proxy:latest
-    ports: ["8080:8080"]
+    image: ghcr.io/awsl1414/zcode-proxy:latest
+    ports:
+      - "8080:8080"
     volumes:
-      - ./config.yaml:/data/config.yaml:ro
-      - ./credentials.json:/home/bun/.zcode-proxy/credentials.json:ro
+      - ./data:/data
     environment:
-      ZCODE_PROXY_CREDENTIAL_SECRET: "a-passphrase-only-you-know"
+      # Encryption seed for the account files. Changing it loses every imported account.
+      ZCODE_PROXY_CREDENTIAL_SECRET: "replace-with-a-fixed-random-string"
     restart: unless-stopped
 ```
+
+`./data` is the whole install's storage directory: `config.yaml` (written on first start), `accounts.json`, `apikeys.json`, `users.json`, `policy.json`, plus the runtime-written `requests.jsonl` (request log), `activities.jsonl` (claim ledger) and `control.port`. Backups, machine moves and migrations copy this one directory.
+
+Create the mount directory first: when it does not exist, Docker makes it as root while the container runs as uid 1000 (the image's `bun` user), so writing `config.yaml` fails with a permission error. If the host's first user is not uid 1000, use `mkdir -p data && sudo chown 1000:1000 data`.
+
+`ZCODE_PROXY_CREDENTIAL_SECRET` is the encryption seed for those files. Set it once and never change it: a different value makes every imported account and every existing key unreadable. It does not live in `config.yaml`, because that would store the secret in plaintext in the config file.
+
+The port lives in `data/config.yaml` under `server.port` (the template ships 8080). Changing it means changing the compose `ports` too, since the in-container listener follows the YAML. The image carries a `HEALTHCHECK` against `/healthz`, the control surface's unauthenticated probe, so creating an API key does not turn it into a 401; with `--no-panel` that path answers nothing and the container reports unhealthy.
 
 </details>
 
 <details>
 <summary><b>Configuration & Environment Variables</b> (works out of the box either way)</summary>
 
-The config file is `config.yaml` in the project root (auto-generated on first start; see [`config.example.yaml`](config.example.yaml) for fully commented options). Environment variables take precedence. The most useful ones:
+The config file is `config.yaml` in the process's working directory (auto-generated on first start; see [`config.example.yaml`](config.example.yaml) for fully commented options); in a container `ZCODE_PROXY_CONFIG` points it at `/data/config.yaml`. **There is one place to configure things: `config.yaml`, or the panel's Settings page** (the panel writes back to that file). Environment variables are for process-level overrides, not user configuration, so ports, switches and origins all live in `config.yaml`.
+
+The env vars the runtime reads are none of them user configuration:
 
 | Env variable | Default | Description |
 |----------|------|------|
-| `ZCODE_PROXY_PORT` | `8080` | Listening port |
-| `ZCODE_PROXY_API_KEY` | none | Key clients use to access the proxy (unset = no verification) |
-| `ZCODE_PROVIDER` | `zai` | Provider: `zai` / `bigmodel` |
-| `ZCODE_PROXY_CONFIG` | `config.yaml` | Config file path |
-| `ZCODE_PROXY_CREDENTIAL_SECRET` | machine-specific | Encryption seed for login credentials (fix it when migrating across machines / using Docker) |
-| `ZCODE_LOG_FORMAT` | desktop table | Set to `compact` for single-line logs (good for narrow screens) |
-| `ZCODE_PANEL_ENABLED` | off | Set to `1`/`true` to start a local web panel in headless `serve` mode (including Docker) |
-| `ZCODE_PANEL_TOKEN` | none | Access token for the panel, **required when the panel is enabled** (without it the panel does not start, so the control endpoints are never left open) |
-| `ZCODE_PANEL_PORT` | `8090` | Panel port |
-| `ZCODE_PANEL_HOST` | `127.0.0.1` | Panel bind address. Docker bridge networks cannot `-p`-map a loopback bind, so set `0.0.0.0` there; pair it with a **strong token** and do **not** expose the port publicly |
-| `ZCODE_UPDATE_CHECK` | on | Set to `off`/`0` to disable the startup "new version" check (it only notifies, it never updates in place) |
-| `ZCODE_UPDATE_SKIP` | none | Comma-separated tags to mute, e.g. `v4.7.6,v4.7.7` |
+| `ZCODE_PROXY_CONFIG` | `config.yaml` | Config file path (a start argument: the YAML is not known yet; `/data/config.yaml` in the image) |
+| `ZCODE_PROXY_STORE_DIR` | `~/.zcode-proxy` | Storage directory: accounts, API keys, control-surface users and account policies all land here (`/data` in the image) |
+| `ZCODE_PROXY_CREDENTIAL_SECRET` | machine-specific | Encryption seed for those store files (fix it when migrating across machines / using Docker) |
+| `ZCODE_LOG_FORMAT` | desktop table | Set to `compact` for single-line logs (narrow screens and `docker logs`; the image already sets it) |
+| `ZCODE_ENV` | production | `test` reports the client release channel as test; irrelevant on desktop |
+| `ZCODE_UPDATE_CHECK` / `ZCODE_UPDATE_SKIP` | on / none | Disable the "new version" check / comma-separated tags to mute, e.g. `v5.0.0,v5.0.1` |
+| `HTTP_PROXY` / `HTTPS_PROXY` | none | System proxy, used by captcha solving and upstream requests |
+| `CAPTCHA_POOL_MAX` / `CAPTCHA_SOLVE_CONCURRENCY` / `CAPTCHA_CPU_LIMIT_PCT` | `60` / `3` / `100` | Captcha pool ceiling, solve concurrency, CPU ceiling (lower them on weak hardware) |
 
-The plan type (`plan`: `coding-plan` personal / `start-plan` trial) can be toggled in the panel with <kbd>t</kbd>, which writes the change back to config.yaml.
+A few more are process-level overrides, usually irrelevant for desktop deployments: `ZCODE_IDENTITY_*` (explicitly overrides outbound identity headers; defaults to the machine's real values), `ZCODE_DUMP_UPSTREAM` / `CAPTCHA_DEBUG` / `CAPTCHA_DEBUG_BODIES` (troubleshooting), `CAPTCHA_ACQUIRE_BUDGET_MS` / `CAPTCHA_CONFIG_TIMEOUT_MS` / `CAPTCHA_CONFIG_TTL_MS` (captcha acquisition budget and config fetch limits, default 45s / 15s / 1h), `ZCODE_CAPTCHA_WORKER` / `ZCODE_CAPTCHA_WARM_WORKERS` (worker path and warm-pool size for compiled builds), `MCP_AGGREGATE_TOOLS_TTL_MS` (`/mcp` tool cache, 5 minutes by default) and `ZCODE_OAUTH_PASTE` (same as `auth login --paste`).
 
-Without a TUI (cloud server) you can use a browser instead: set `ZCODE_PANEL_ENABLED=1` and `ZCODE_PANEL_TOKEN=<your own random string>`, start the proxy, then forward the port and open `http://127.0.0.1:8090` — it shows status and quota, switches provider/plan, logs in and out, and tails the live logs plus the MCP list. The panel binds loopback by default (`ZCODE_PANEL_HOST` overrides the address, see below) and requires the token on every API call; without a token it does not start. Commands are dispatched in process, so no extra control port is opened. Stopping the proxy from the page does not keep the process alive: SIGTERM/SIGINT and the panel's own shutdown all clear the background timers (auto-claim, captcha pool) before exiting. Logging out from the page also clears the live credential and stops the proxy, so a logged-out account is not spent any further.
+The plan type (`plan`: `coding-plan` personal / `start-plan` trial) is a property of the **account**: it is derived from the credential and its subscription at import time, and no process-level policy overrides it. Changing plans therefore means changing accounts: re-import on the panel's Accounts page (remove, then add) or with the `zcode-proxy auth account` command family; it takes effect immediately.
 
-**Update notice**: on startup `serve` and the TUI ask GitHub once for the latest release, printing at most one extra log line (press <kbd>u</kbd> in the TUI to re-check manually). It never blocks startup and never affects the proxy: offline, blocked, rate-limited or unexpected answers are ignored silently. A manual check always answers — "already on the latest version" or "check unavailable". Container images are immutable, so the hint names the pull command of the **detected runtime** (Docker: `docker compose pull && docker compose up -d`, Podman: `podman compose pull && podman compose up -d`; when the runtime cannot be told apart it just says "pull the new image and recreate the container") rather than replacing files in place (release artifacts carry no checksums yet, so automatic download-and-replace is not offered). Set `ZCODE_UPDATE_CHECK=off` to disable the check, or `ZCODE_UPDATE_SKIP=v4.7.6` to mute a single tag.
+The panel is on by default and shares the proxy's **own port** (`panel.enabled` turns it on or off in `config.yaml`, `panel.host` changes the address it answers on, and `--no-panel` only affects one start) — it shows status and quota, manages accounts, edits the routing policy, logs in and out, and tails the live logs (the MCP catalogue lives on the data plane at `GET /mcp`, not in the panel). Access goes through a login page: the first start prints an admin password once in the terminal (user `admin`), you can change it in Settings, and the session lives in the server process with a sliding 12-hour expiry. Commands are dispatched in process, so no extra control port is opened. SIGTERM/SIGINT and the panel's own shutdown clear the background timers (auto-claim, captcha pool) before exiting. Logging out from the page only ends the panel session and leaves the upstream account and credentials unaffected.
 
-**Reaching the panel from Docker**: the panel listens on the *container's own* `127.0.0.1` by default, so with the default bridge network `-p 8080:8080` does not expose it, and adding `-p 8090:8090` does not help either (that maps a non-loopback container address). Two ways out: ① add `ZCODE_PANEL_HOST=0.0.0.0` to the environment plus `-p 8090:8090` — the panel then binds every container interface, so the token must be strong and 8090 should only be reachable by whoever needs it; ② on a Linux server, use host networking so the container shares the host's loopback:
+**Update notice**: on startup the proxy asks GitHub once for the latest release, printing at most one extra log line (the panel's Settings page can re-check manually). It never blocks startup and never affects the proxy: offline, blocked, rate-limited or unexpected answers are ignored silently. A manual check always answers — "already on the latest version" or "check unavailable". Container images are immutable, so the hint names the pull command of the **detected runtime** (Docker: `docker compose pull && docker compose up -d`, Podman: `podman compose pull && podman compose up -d`; when the runtime cannot be told apart it just says "pull the new image and recreate the container") rather than replacing files in place (release artifacts carry no checksums yet, so automatic download-and-replace is not offered). Set `ZCODE_UPDATE_CHECK=off` to disable the check, or `ZCODE_UPDATE_SKIP=v5.0.0` to mute a single tag.
 
-```yaml
-services:
-  zcode-proxy:
-    # keep the existing image / volumes / restart settings
-    network_mode: host        # and drop the original ports: block
-    environment:
-      ZCODE_PROXY_CREDENTIAL_SECRET: "a-passphrase-only-you-know"
-      ZCODE_PANEL_ENABLED: "1"
-      ZCODE_PANEL_TOKEN: "${ZCODE_PANEL_TOKEN:?set a panel token in .env first}"
-      ZCODE_PANEL_PORT: "8090"
-```
+**Reaching the panel from Docker**: the panel is mounted on the proxy's own listener, so `-p 8080:8080` is enough. Open `http://<host>:8080/` and you get the login page; the admin password is in the first start's `docker logs`. After signing in, the panel and the proxy share one port and one session.
 
-Then forward-only tunnel from your machine (`-N` = no shell):
-
-```bash
-ssh -N -L 8090:127.0.0.1:8090 user@host
-```
-
-and open `http://127.0.0.1:8090`. With host networking the proxy port is the host port too, so keep the firewall rules for 8080 as they were and do **not** expose 8090 publicly.
+Outside a container, to keep the control surface local while the proxy stays reachable, set `panel.host` to `127.0.0.1` in `config.yaml`: the proxy still binds `0.0.0.0`, but the panel only answers local requests. Do not do that in a container, where the host would no longer reach the panel.
 
 </details>
 
@@ -225,9 +225,9 @@ and open `http://127.0.0.1:8090`. With host networking the proxy port is the hos
 
 **Off-peak channel (`/async/*`)** — a free compute channel the official service opens during off-peak hours (e.g. late night). Requests queue up for a ticket first and are automatically sent to the model once their turn arrives (great for non-urgent batch jobs). Enable it with `async.enabled: true` in `config.yaml`; note that it's one-shot with no conversation memory — for multi-turn chats, include the history in the request.
 
-**Weekend/trial plan auto-claiming (claim)** — enabled by default. The proxy probes the official limited-plan campaign page every 5 minutes and grabs new drops for you the instant they appear (`claim.enabled: false` to disable). Manual run: `bun run src/index.ts claim`.
+**Weekend/trial plan auto-claiming (claim)** — enabled by default. The proxy probes the official limited-plan campaign every 5 minutes (`claim.pollIntervalMs`), preheats ahead of an opening and bursts the moment it goes live; set `claim.auto: false` to stop the background job, or `claim.enabled: false` to turn the whole thing off. Manual run: `bun run src/index.ts claim`.
 
-**Quota display (quota)** — after login the panel fetches quota once automatically; refresh manually with <kbd>r</kbd>. Data comes from two upstream planes: trial/credits-plan buckets (`billing/balance`, remaining / total units, expiry) and individual coding-plan usage windows (`/api/monitor/usage/quota/limit`, same endpoint the official usage panel reads — 5-hour / weekly window **remaining** and reset time. Upstream `number` is not a total comparable with remaining, so like the CLI/TUI only remaining is shown, and a bar is drawn only when upstream reports a percentage). CLI: `bun run src/index.ts quota` (HTTP: `GET /quota`). The upstream gateways rate-limit frequent queries, so the panel does not poll on a timer.
+**Quota display (quota)** — accounts are sampled in the background every `accounts.quota.pollSeconds` (300 by default), plus one probe round at startup, so quota refreshes on its own after login; the appbar refresh button and the `r` key trigger an immediate re-sample for the current view. Data comes from two upstream planes: trial/credits-plan buckets (`billing/balance`, remaining / total units, expiry) and individual coding-plan usage windows (`/api/monitor/usage/quota/limit`, same endpoint the official usage panel reads — 5-hour / weekly window **remaining** and reset time. Upstream `number` is not a total comparable with remaining, so like the CLI only remaining is shown, and a bar is drawn only when upstream reports a percentage). CLI: `bun run src/index.ts quota` (HTTP: `GET /quota`).
 
 </details>
 
@@ -242,20 +242,23 @@ The table below is for reference only:
 
 ## ❓ FAQ
 
-**It exits right after startup saying "Not logged in"?**
-Log in first: `bun run src/index.ts auth login zai` (or bigmodel). Logging in once is enough; credentials are stored encrypted.
+**Startup says "No account yet" / requests return 503?**
+The proxy starts without an account; requests then fail with the `no-account` code (503). Log in with `bun run src/index.ts auth login zai` (or bigmodel), or add an account on the panel's Accounts view. Logging in once is enough; credentials are stored encrypted.
 
 **Port 8080 is already taken?**
-Pick another one via an environment variable: `ZCODE_PROXY_PORT=8081 bun run src/index.ts`, or change `server.port` in `config.yaml`.
+Change `server.port` in `config.yaml` (or use the panel's Settings page, which writes back to the same file).
 
 **My tool can't connect / gets a 401?**
-If you've set `ZCODE_PROXY_API_KEY`, your tool must send the same value; without it, no key is required. Note that once the key is enabled, **all routes** except `/webui` (including `/health`) require it.
+Your tool must send one of the keys created on the panel's API keys page. While no key exists the data plane does not verify anything; once a key exists, **all routes** (including `/health`) except the panel's own session (a browser signed in to the panel) require one, and a disabled key gets the same 401 as a wrong one.
 
 **Do I need to log in again after switching computers or reinstalling the OS?**
-Yes. Credentials are encrypted with machine-bound information. To migrate across machines, set the same `ZCODE_PROXY_CREDENTIAL_SECRET` on both sides, then log in / copy `~/.zcode-proxy/credentials.json`.
+Yes. Credentials are encrypted with machine-bound information. To migrate across machines, set the same `ZCODE_PROXY_CREDENTIAL_SECRET` on both sides, then copy the whole `~/.zcode-proxy/` directory (accounts, keys and control-surface users live there).
 
 **No browser on my server — how do I log in?**
 Just log in directly: `bun run src/index.ts auth login zai` (or bigmodel). The login link can be opened in any device's browser; after you authorize, the local side completes automatically (no callback page needed). If you prefer a manual exchange, there's also a paste mode: `auth login bigmodel --paste` — paste back the full URL you're redirected to.
+
+**I already logged in with the ZCode client. Do I have to authorize again?**
+No. `bun run src/index.ts auth import` reads `~/.zcode/v2/credentials.json`, exchanges the OAuth token inside for the coding-plan API key, and imports the plan JWT along with it. If that exchange fails you still end up with the JWT, which covers start-plan, quota and claim; MCP, async and highspeed also need the coding-plan key. With only a JWT in hand, paste it: `auth import --jwt <token>`. Importing does not renew anything, so re-import or log in again once the credential stops working.
 
 **What does it actually do in the background?**
 It's a "translator + courier": it translates the standard requests from your tools into the same requests the official client sends, forwards them, and translates the responses back as-is. All traffic stays between your machine and the official servers — it never passes through any third party.
@@ -279,7 +282,8 @@ keys.
 
 ## License
 
-Copyright (c) 2026 TriDefender and the ZCode Proxy contributors.
+Copyright (c) 2026 awsl1414 and the ZCode Proxy contributors.
+Based on ZCode Proxy by TriDefender and contributors.
 
 This project uses **[Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/)**. [LICENSE](LICENSE) contains the unmodified official standard text, preceded by the project's copyright and license notice.
 
