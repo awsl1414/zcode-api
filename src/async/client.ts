@@ -13,6 +13,7 @@
  *
  * @see _reverse/NOTEPAD.md "Off-Peak / Idle Plan" → "Endpoints" / "Headers"
  */
+import { fetchWithEgress, type EgressOptions } from "../proxy/egress.js";
 import type {
   AvailabilityResult,
   BatchStatusResult,
@@ -30,6 +31,11 @@ export interface OffPeakClientOptions {
   controlTimeoutMs?: number;
   /** DI seam for tests. Default `globalThis.fetch`. */
   fetchImpl?: (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
+  /**
+   * 该账号的出口代理。创建时固定，换代理要重建客户端
+   * （见 `accounts/proxies.ts::resolveEgress`）。
+   */
+  egress?: EgressOptions;
   /** Settle-specific timeout override (default = controlTimeoutMs). Set lower for fire-and-forget abort paths. */
   settleTimeoutMs?: number;
 }
@@ -97,7 +103,7 @@ export function createOffPeakClient(opts: OffPeakClientOptions): OffPeakClient {
     let raw = "";
     try {
       try {
-        resp = await fetchImpl(url, init);
+        resp = await fetchWithEgress(fetchImpl, url, init, opts.egress);
       } catch (err) {
         const msg = (err as Error)?.message ?? String(err);
         if (/abort/i.test(msg)) throw new OffPeakServerError(`off-peak request aborted: ${method} ${path}`, 0);

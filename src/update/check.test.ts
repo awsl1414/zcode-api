@@ -1,10 +1,9 @@
 /**
- * Tests for `src/update/check.ts` — the CLI/TUI update notice (issue #60).
+ * Tests for `src/update/check.ts` — the CLI update notice (issue #60).
  *
  * Every case injects a mock transport: the suite never touches the network,
- * and the "silent failure" contract (which the Android checker documents, and
- * which is why this module deliberately has no throwing path) is what most of
- * these assertions are about.
+ * and the "silent failure" contract (which is why this module deliberately has
+ * no throwing path) is what most of these assertions are about.
  */
 import { describe, it, expect } from "bun:test";
 import {
@@ -12,7 +11,6 @@ import {
   RELEASES_PAGE,
   buildUpdateNotice,
   checkForUpdate,
-  createUpdateCheckQueue,
   detectContainerRuntime,
   fetchLatestRelease,
   isNewerVersion,
@@ -56,10 +54,10 @@ describe("isNewerVersion", () => {
   });
 
   it("accepts the variant suffixes this repository actually uses", () => {
-    // Real tags: v4.7.2.android, v4.5.4-AppOverhaul, v2.0.5.alpha, v1.4.7.alpha.
-    expect(isNewerVersion("4.7.5", "v4.7.6-android")).toBe(true);
+    // Real tags: v4.7.2 (and its v4.7.2.extra-suffix form), v4.5.4-AppOverhaul,
+    // v2.0.5.alpha, v1.4.7.alpha.
     expect(isNewerVersion("4.7.5", "v4.7.6-rc.1")).toBe(true);
-    expect(isNewerVersion("4.7.1", "v4.7.2.android")).toBe(true);
+    expect(isNewerVersion("4.7.1", "v4.7.2.extra")).toBe(true);
     expect(isNewerVersion("4.5.4", "v4.5.4-AppOverhaul")).toBe(false);
     expect(isNewerVersion("4.7.5", "v4.8")).toBe(true);
     expect(isNewerVersion("4.7.5", "4.8")).toBe(true);
@@ -71,7 +69,7 @@ describe("isNewerVersion", () => {
     expect(isNewerVersion("not-a-version", "v9.9.9")).toBe(false);
     // Unseparated junk must not decay into a version core.
     expect(isNewerVersion("4.7.5", "v4.7.6garbage")).toBe(false);
-    expect(isNewerVersion("4.7.5", "v4.7.6garbage-android")).toBe(false);
+    expect(isNewerVersion("4.7.5", "v4.7.6garbage-rc.1")).toBe(false);
     // A fourth numeric segment is not a version we understand.
     expect(isNewerVersion("4.7.5", "v4.7.6.1")).toBe(false);
     expect(isNewerVersion("4.7.5", "v4.7.6-")).toBe(false);
@@ -85,7 +83,7 @@ describe("parseVersion", () => {
     expect(parseVersion("4.8")).toEqual([4, 8, 0]);
     expect(parseVersion("5")).toEqual([5, 0, 0]);
     expect(parseVersion("v4.7.6-rc.1")).toEqual([4, 7, 6]);
-    expect(parseVersion("v4.7.2.android")).toEqual([4, 7, 2]);
+    expect(parseVersion("v4.7.2-rc.2")).toEqual([4, 7, 2]);
   });
 
   it("returns null when there is no numeric core", () => {
@@ -115,7 +113,7 @@ describe("isSkippedVersion", () => {
   it("matches muted tags regardless of the v prefix and whitespace", () => {
     expect(isSkippedVersion("v4.7.6", { ZCODE_UPDATE_SKIP: "v4.7.6" })).toBe(true);
     expect(isSkippedVersion("4.7.6", { ZCODE_UPDATE_SKIP: " v4.7.6 , v4.7.7 " })).toBe(true);
-    expect(isSkippedVersion("v4.7.6-android", { ZCODE_UPDATE_SKIP: "4.7.6" })).toBe(true);
+    expect(isSkippedVersion("v4.7.6-rc.1", { ZCODE_UPDATE_SKIP: "4.7.6" })).toBe(true);
   });
 
   it("does not mute anything else", () => {
@@ -296,61 +294,5 @@ describe("checkForUpdate", () => {
   it("reports unavailable when the network fails, never throwing", async () => {
     const result = await checkForUpdate("4.7.5", { fetchImpl: rejecting(), env: {} });
     expect(result.kind).toBe("unavailable");
-  });
-});
-
-describe("createUpdateCheckQueue", () => {
-  function gate(): { promise: Promise<void>; open: () => void } {
-    let open!: () => void;
-    const promise = new Promise<void>((resolve) => {
-      open = resolve;
-    });
-    return { promise, open };
-  }
-
-  it("runs immediately when idle", async () => {
-    const calls: boolean[] = [];
-    const queue = createUpdateCheckQueue(async (manual) => {
-      calls.push(manual);
-    });
-    await queue();
-    await queue(true);
-    expect(calls).toEqual([false, true]);
-  });
-
-  it("queues a manual check that arrives while one is in flight", async () => {
-    const pending = gate();
-    const calls: boolean[] = [];
-    const queue = createUpdateCheckQueue(async (manual) => {
-      calls.push(manual);
-      if (calls.length === 1) await pending.promise;
-    });
-
-    const startup = queue(false);
-    const manual = queue(true); // `u` while the startup check is still running
-    expect(calls).toEqual([false]); // queued, not dropped
-
-    pending.open();
-    await Promise.all([startup, manual]);
-    expect(calls).toEqual([false, true]); // the queued manual run did happen
-  });
-
-  it("drops an automatic duplicate and coalesces repeated manual presses", async () => {
-    const pending = gate();
-    const calls: boolean[] = [];
-    const queue = createUpdateCheckQueue(async (manual) => {
-      calls.push(manual);
-      if (calls.length === 1) await pending.promise;
-    });
-
-    const startup = queue();
-    const duplicate = queue();
-    const manual = queue(true);
-    const secondPress = queue(true);
-    expect(calls).toEqual([false]);
-
-    pending.open();
-    await Promise.all([startup, duplicate, manual, secondPress]);
-    expect(calls).toEqual([false, true]);
   });
 });

@@ -1,6 +1,6 @@
 /**
  * Async bridge: core state machine turning sync client stream expectation
- * into off-peak async reality. See src/async/AGENTS.md for the state machine contract.
+ * into off-peak async reality. The state machine contract is below.
  *
  * State machine:
  *   WAIT   (queued)            → poll every pollIntervalMs (signal-aware); emit keepalives
@@ -9,7 +9,7 @@
  *   DONE   (stream completed)  → settleOnce(current); close stream
  *   ABORT  (client disconnect) → settleOnce(current); release resources
  *
- * Anti-patterns enforced (see plan §9):
+ * Anti-patterns enforced here:
  *   #1 — pure `: keepalive\n\n` comments during wait; no custom data events
  *   #2 — every takeTicket matched by exactly one settleOnce (idempotent)
  *   #3 — retry resends original prompt (no NOe placeholder)
@@ -17,6 +17,7 @@
  *
  * Output: homogeneous byte stream (keepalives + upstream Anthropic bytes + terminal error events).
  */
+import { fetchWithEgress, type EgressOptions } from "../proxy/egress.js";
 import type { OffPeakClient } from "./client.js";
 import type { OffPeakCredentials, TakeTicketResult, TicketState } from "./types.js";
 import { isTicketExpired, isTicketReady } from "./types.js";
@@ -32,6 +33,13 @@ export interface BridgeOptions {
   credentials: OffPeakCredentials;
   origin: string;
   identity: ProxyIdentity;
+  /**
+   * 本次租约账号的设备指纹（一账号一指纹）。
+   *
+   * 它不能是 `identity` 的字段：`ProxyIdentity` 是进程级配置，deviceMid 是账号级
+   * 事实。官方客户端把 deviceMid 当“这台机器的设备 ID”，多账号共用它 = 一机多号。
+   */
+  deviceMid: string;
   llmRequestBody: string;
   initialTicket: TakeTicketResult;
   taskId: string;
@@ -42,6 +50,14 @@ export interface BridgeOptions {
   maxWaitMs: number;
   clientSignal?: AbortSignal;
   fetchImpl?: (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
+  /** 该账号的出口代理。*/
+  egress?: EgressOptions;
+  /**
+   * 出线响应的观测回调（统一观测点）。每次 `forwardLLM` 拿到上游响应
+   * （含票券过期重取后的再次出线）都在读体之前递一次——信号解析与健康动作在
+   * handler 侧的 `observeUpstream`（同数据面规则），桥接自己不碰 broker。
+   */
+  onUpstreamResp?: (resp: Response) => void | Promise<unknown>;
   onTransition?: (info: BridgeTransition) => void;
 }
 
@@ -185,17 +201,27 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
       authorization: `Bearer ${opts.credentials.jwt}`,
       "x-coding-plan-api-key": opts.credentials.codingPlanApiKey,
       "x-off-peak-ticket-id": ticketId,
-      ...buildIdentityHeaders(opts.identity),
+      ...buildIdentityHeaders(opts.identity, opts.deviceMid),
     };
     if (opts.credentials.bigmodelOrganization) headers["bigmodel-organization"] = opts.credentials.bigmodelOrganization;
     if (opts.credentials.bigmodelProject) headers["bigmodel-project"] = opts.credentials.bigmodelProject;
 
-    const resp = await fetchImpl(url, {
+    const resp = await fetchWithEgress(fetchImpl, url, {
       method: "POST",
       headers,
       body: opts.llmRequestBody,
       signal,
-    });
+    }, opts.egress);
+
+    // 出线响应 → 观测回调（在读体之前：observeUpstream 只读 clone()，
+    // 不挡这里对错误体的消费）。观测失败不打断桥接（旁路语义）。
+    if (opts.onUpstreamResp) {
+      try {
+        await opts.onUpstreamResp(resp);
+      } catch {
+        // 有意吞错：观测失败不能把桥接打成错误。
+      }
+    }
 
     if (!resp.ok) {
       const bodyText = await resp.text().catch(() => "");
@@ -343,7 +369,7 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
 
           // Stream upstream body with complete-frame buffering.
           //
-          // DESIGN (fixes R3-2/R3-3/R4-1/R4-3 + bounds memory R4-5):
+          // DESIGN (bounds memory here and keeps UTF-8 / CRLF handling correct):
           //   - One TextDecoder for the whole streaming phase (handles partial
           //     multibyte UTF-8 correctly across chunk boundaries).
           //   - Accumulate decoded text until a complete SSE frame (LF/CRLF/CR).

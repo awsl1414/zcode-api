@@ -1,7 +1,5 @@
 /**
- * Update notice (issue #60) — the CLI/TUI counterpart of the Android app's
- * `UpdateChecker`. The Android rules are ported as-is so both ends agree on
- * what "newer" means:
+ * Update notice (issue #60). The rules:
  *
  *   - ask the GitHub releases API for the newest tag (`/releases/latest`
  *     already excludes prereleases),
@@ -25,18 +23,18 @@
 import { existsSync } from "node:fs";
 
 /** Newest stable release (the API excludes prereleases). */
-export const LATEST_RELEASE_API = "https://api.github.com/repos/TriDefender/zcode-api/releases/latest";
+export const LATEST_RELEASE_API = "https://api.github.com/repos/awsl1414/zcode-api/releases/latest";
 /** Human-facing releases page, used for the "how to update" hint. */
-export const RELEASES_PAGE = "https://github.com/TriDefender/zcode-api/releases";
+export const RELEASES_PAGE = "https://github.com/awsl1414/zcode-api/releases";
 /**
- * GitHub answers 403 to requests without a User-Agent — the Android checker
- * carries an explicit one for exactly this reason.
+ * GitHub answers 403 to requests without a User-Agent, so the check carries
+ * an explicit one.
  */
 const USER_AGENT = "zcode-proxy-update-check";
 const REQUEST_TIMEOUT_MS = 10_000;
 /** `ZCODE_UPDATE_CHECK=off` disables the automatic startup check. */
 const UPDATE_CHECK_ENV = "ZCODE_UPDATE_CHECK";
-/** `ZCODE_UPDATE_SKIP=v4.7.6,v4.7.7` mutes specific tags (Android's skipped_tag). */
+/** `ZCODE_UPDATE_SKIP=v5.0.0,v5.0.1` mutes specific tags. */
 const UPDATE_SKIP_ENV = "ZCODE_UPDATE_SKIP";
 const DISABLED_VALUES = new Set(["0", "false", "off", "no", "disable", "disabled"]);
 
@@ -97,14 +95,14 @@ export function updateCheckEnabled(env: Env = process.env): boolean {
 
 /**
  * Accepted release-tag shape: an optional `v`, one to three numeric segments,
- * and an optional, explicitly separated variant suffix — `v4.7.5`, `4.8`,
- * `v4.7.2.android`, `v4.5.4-AppOverhaul`, `v4.7.6-rc.1`. The end anchor is what
- * keeps `v4.7.6garbage` (as well as `v4.7.6.1`, `Windows`, `latest`) from being
- * read as `4.7.6` and nagging forever: no version core means "never newer".
+ * and an optional, explicitly separated variant suffix — `v5.0.0`, `5.0`,
+ * `v5.0.0-rc.2`, `v4.5.4-AppOverhaul`, `v5.0.1-rc.1`. The end anchor is what
+ * keeps `v5.0.1garbage` (as well as `v5.0.1.1`, `Windows`, `latest`) from being
+ * read as `5.0.1` and nagging forever: no version core means "never newer".
  */
 const VERSION_TAG = /^v?(\d+(?:\.\d+){0,2})(?:[.-][A-Za-z][0-9A-Za-z.-]*)?$/;
 
-/** `v4.7.2.android` → `4.7.2`; `""` when the tag is not a release version. */
+/** `v5.0.0-rc.2` → `5.0.0`; `""` when the tag is not a release version. */
 function versionCore(tag: string): string {
   const match = VERSION_TAG.exec(tag.trim());
   return match ? match[1] : "";
@@ -129,9 +127,9 @@ export function parseVersion(tag: string): [number, number, number] | null {
 }
 
 /**
- * Android's rule (`UpdateChecker.isNewer`): compare the three numeric segments
- * in order. An unparsable tag is never "newer" — otherwise a single malformed
- * release would nag every user on every start.
+ * Compare the three numeric segments in order. An unparsable tag is never
+ * "newer" — otherwise a single malformed release would nag every user on
+ * every start.
  */
 export function isNewerVersion(current: string, latest: string): boolean {
   const running = parseVersion(current);
@@ -193,7 +191,7 @@ export function buildUpdateNotice(
  * Ask the releases API for the newest tag. Returns null for every failure mode
  * — DNS/TLS/proxy interference, timeout, non-2xx (rate limit, 404), truncated
  * or unexpected JSON — because the caller must never treat "cannot check" as an
- * error (the Android checker documents the same contract).
+ * error.
  */
 export async function fetchLatestRelease(opts: UpdateCheckOptions = {}): Promise<ReleaseInfo | null> {
   const fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
@@ -236,42 +234,4 @@ export async function checkForUpdate(current: string, opts: UpdateCheckOptions =
   if (!opts.force && isSkippedVersion(release.tag, env)) return { kind: "skipped", latest: release.tag };
   const runtime = opts.containerRuntime !== undefined ? opts.containerRuntime : detectContainerRuntime(env);
   return { kind: "update", notice: buildUpdateNotice(current, release, runtime) };
-}
-
-/**
- * Single-flight scheduler for the startup / manual update check. While a check
- * is running, another automatic call is dropped (the startup check answers it
- * anyway) but a manual call is queued and re-run once the current request
- * settles — pressing `u` during the startup check must still produce its own
- * answer, and the startup result cannot be reused because it may have been
- * disabled by `ZCODE_UPDATE_CHECK=off` or muted by `ZCODE_UPDATE_SKIP`.
- * Repeated presses collapse into one queued check.
- */
-export function createUpdateCheckQueue(run: (manual: boolean) => Promise<void>): (manual?: boolean) => Promise<void> {
-  let inFlight: Promise<void> | null = null;
-  let manualQueued = false;
-
-  async function start(manual: boolean): Promise<void> {
-    const current = (async () => {
-      try {
-        await run(manual);
-      } finally {
-        inFlight = null;
-      }
-    })();
-    inFlight = current;
-    await current;
-    if (manualQueued) {
-      manualQueued = false;
-      await start(true);
-    }
-  }
-
-  return (manual = false) => {
-    if (inFlight) {
-      if (manual) manualQueued = true;
-      return inFlight;
-    }
-    return start(manual);
-  };
 }

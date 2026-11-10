@@ -15,7 +15,10 @@ import type { OffPeakCredentials, TakeTicketResult, TicketState } from "./types.
 import type { ProxyIdentity } from "../config/types.js";
 
 const CRED: OffPeakCredentials = { jwt: "jwt-x", codingPlanApiKey: "key-y" };
-const TEST_IDENTITY: ProxyIdentity = { appVersion: "test-1.0.0", sourceTitle: "cli", refererOrigin: "https://zcode.z.ai" };
+const TEST_IDENTITY: ProxyIdentity = { appVersion: "test-1.0.0", appVersionSource: "default", sourceTitle: "cli", refererOrigin: "https://zcode.z.ai", betaPolicy: "drop", betaAllowlist: [] };
+
+/** 租约账号的设备指纹（一账号一指纹）。*/
+const TEST_DEVICE_MID = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
 
 function makeMockClient(behaviour: {
   initialTicketState?: TicketState;
@@ -111,6 +114,7 @@ describe("runAsyncBridge — happy paths", () => {
       credentials: CRED,
       origin: "https://zcode.z.ai",
       identity: TEST_IDENTITY,
+      deviceMid: TEST_DEVICE_MID,
       llmRequestBody: '{"model":"glm-4.6","messages":[]}',
       initialTicket: { ticketId: "t-init", state: "ready", registeredAt: Date.now() },
       taskId: "task-1",
@@ -146,6 +150,7 @@ describe("runAsyncBridge — happy paths", () => {
       credentials: CRED,
       origin: "https://zcode.z.ai",
       identity: TEST_IDENTITY,
+      deviceMid: TEST_DEVICE_MID,
       llmRequestBody: '{"model":"x"}',
       initialTicket: { ticketId: "t-init", state: "queued", registeredAt: Date.now() },
       taskId: "task-1",
@@ -175,6 +180,7 @@ describe("runAsyncBridge — SSE frame boundaries", () => {
         credentials: CRED,
         origin: "https://zcode.z.ai",
         identity: TEST_IDENTITY,
+        deviceMid: TEST_DEVICE_MID,
         llmRequestBody: '{"model":"x"}',
         initialTicket: { ticketId: "t-init", state: "ready", registeredAt: Date.now() },
         taskId: "task-1",
@@ -241,6 +247,7 @@ describe("runAsyncBridge — ticket expiry + retry", () => {
       credentials: CRED,
       origin: "https://zcode.z.ai",
       identity: TEST_IDENTITY,
+      deviceMid: TEST_DEVICE_MID,
       llmRequestBody: '{"model":"x"}',
       initialTicket: { ticketId: "t-init", state: "queued", registeredAt: Date.now() },
       taskId: "task-1",
@@ -272,6 +279,7 @@ describe("runAsyncBridge — ticket expiry + retry", () => {
       credentials: CRED,
       origin: "https://zcode.z.ai",
       identity: TEST_IDENTITY,
+      deviceMid: TEST_DEVICE_MID,
       llmRequestBody: '{"model":"x"}',
       initialTicket: { ticketId: "t-init", state: "queued", registeredAt: Date.now() },
       taskId: "task-1",
@@ -316,6 +324,7 @@ describe("runAsyncBridge — ticket expiry + retry", () => {
       credentials: CRED,
       origin: "https://zcode.z.ai",
       identity: TEST_IDENTITY,
+      deviceMid: TEST_DEVICE_MID,
       llmRequestBody: '{"model":"x"}',
       initialTicket: { ticketId: "t-init", state: "ready", registeredAt: Date.now() },
       taskId: "task-1",
@@ -354,6 +363,7 @@ describe("runAsyncBridge — ticket expiry + retry", () => {
       credentials: CRED,
       origin: "https://zcode.z.ai",
       identity: TEST_IDENTITY,
+      deviceMid: TEST_DEVICE_MID,
       llmRequestBody: '{"model":"x"}',
       initialTicket: { ticketId: "t-init", state: "ready", registeredAt: Date.now() },
       taskId: "task-1",
@@ -386,6 +396,7 @@ describe("runAsyncBridge — non-expired upstream errors", () => {
       credentials: CRED,
       origin: "https://zcode.z.ai",
       identity: TEST_IDENTITY,
+      deviceMid: TEST_DEVICE_MID,
       llmRequestBody: '{"model":"x"}',
       initialTicket: { ticketId: "t-init", state: "ready", registeredAt: Date.now() },
       taskId: "task-1",
@@ -432,6 +443,7 @@ describe("runAsyncBridge — abort handling", () => {
           credentials: CRED,
           origin: "https://zcode.z.ai",
           identity: TEST_IDENTITY,
+        deviceMid: TEST_DEVICE_MID,
           llmRequestBody: '{"model":"x"}',
           initialTicket: { ticketId: "t-init", state: phase, registeredAt: Date.now() },
           taskId: "task-1",
@@ -484,6 +496,7 @@ describe("runAsyncBridge — abort handling", () => {
       credentials: CRED,
       origin: "https://zcode.z.ai",
       identity: TEST_IDENTITY,
+      deviceMid: TEST_DEVICE_MID,
       llmRequestBody: '{"model":"x"}',
       initialTicket: { ticketId: "t-init", state: "queued", registeredAt: Date.now() },
       taskId: "task-1",
@@ -541,6 +554,7 @@ describe("runAsyncBridge — abort handling", () => {
       credentials: CRED,
       origin: "https://zcode.z.ai",
       identity: TEST_IDENTITY,
+      deviceMid: TEST_DEVICE_MID,
       llmRequestBody: '{"model":"x"}',
       initialTicket: { ticketId: "t-init", state: "ready", registeredAt: Date.now() },
       taskId: "task-1",
@@ -578,6 +592,7 @@ describe("runAsyncBridge — maxWaitMs overrun (CL-02)", () => {
       credentials: CRED,
       origin: "https://zcode.z.ai",
       identity: TEST_IDENTITY,
+      deviceMid: TEST_DEVICE_MID,
       llmRequestBody: '{"model":"x"}',
       initialTicket: { ticketId: "t-init", state: "queued", registeredAt: Date.now() },
       taskId: "task-1",
@@ -627,6 +642,7 @@ describe("runAsyncBridge — batchStatus transient-error tolerance (CL-03)", () 
       credentials: CRED,
       origin: "https://zcode.z.ai",
       identity: TEST_IDENTITY,
+      deviceMid: TEST_DEVICE_MID,
       llmRequestBody: '{"model":"x"}',
       initialTicket: { ticketId: "t-init", state: "queued", registeredAt: Date.now() },
       taskId: "task-1",
@@ -653,6 +669,7 @@ describe("runAsyncBridge — batchStatus transient-error tolerance (CL-03)", () 
       credentials: CRED,
       origin: "https://zcode.z.ai",
       identity: TEST_IDENTITY,
+      deviceMid: TEST_DEVICE_MID,
       llmRequestBody: '{"model":"x"}',
       initialTicket: { ticketId: "t-init", state: "queued", registeredAt: Date.now() },
       taskId: "task-1",
@@ -693,6 +710,7 @@ describe("runAsyncBridge — credentials + URL composition", () => {
       credentials: { jwt: "the-jwt", codingPlanApiKey: "the-key", bigmodelOrganization: "org-9", bigmodelProject: "proj-9" },
       origin: "https://zcode.z.ai/////",
       identity: TEST_IDENTITY,
+      deviceMid: TEST_DEVICE_MID,
       llmRequestBody: '{"model":"glm-4.6"}',
       initialTicket: { ticketId: "t-xyz", state: "ready", registeredAt: Date.now() },
       taskId: "task-1",

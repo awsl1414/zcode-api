@@ -2,23 +2,45 @@ import { describe, expect, it, afterEach } from "bun:test";
 import {
   HighspeedManager,
   applyHighspeedCardHeaders,
-  isHighspeedCardRejection,
-  rewriteBodyModel,
+  highspeedAuthFrom,
+  highspeedAuthHeaders,
+  isHighspeedFailure,
   type HighspeedAuth,
 } from "./manager.js";
 import type { UpstreamHeaderPair } from "../proxy/upstream.js";
+import { zhipuCredential, accountFor } from "../accounts/testing.js";
 
-const AUTH: HighspeedAuth = { jwt: "test-jwt", codingPlanAuth: "testkey.testsecret", family: "zai" };
+/** PERSONAL 账号鉴权（身份从账号读）。*/
+const AUTH: HighspeedAuth = {
+  jwt: "test-jwt",
+  codingPlanAuth: "testkey.testsecret",
+  family: "zai",
+  identity: { targetType: "PERSONAL" },
+};
+const TEAM_AUTH: HighspeedAuth = {
+  jwt: "team-jwt",
+  codingPlanAuth: "teamkey.teamsecret",
+  family: "bigmodel",
+  identity: { targetType: "TEAM", organizationId: "org-1", projectId: "proj-1" },
+};
 const DRAW_URL = "https://zcode.z.ai/api/v1/highspeed/draw";
 const SESSION_TASK = "11111111-2222-3333-4444-555555555555";
 
-interface DrawCall { url: string; body: Record<string, unknown>; headers: Headers; }
+interface DrawCall { url: string; method: string; body: Record<string, unknown>; headers: Headers; }
 
 function drawResponse(card: Record<string, unknown> | null, nextDrawAt?: number): Response {
   return new Response(JSON.stringify({ code: 0, msg: "success", data: { card, next_draw_at: nextDrawAt ?? 0 } }), { status: 200 });
 }
 
-function hitCard(now: number, model = "glm-5.3-highspeed"): Record<string, unknown> {
+function healthyResponse(cardId = "hsc_test_1"): Response {
+  return new Response(JSON.stringify({
+    code: 0,
+    msg: "success",
+    data: { card_id: cardId, prompt_tokens: 11, completion_tokens: 22, duration_seconds: 3 },
+  }), { status: 200 });
+}
+
+function hitCard(now: number, model = "glm-5.3"): Record<string, unknown> {
   return { card_id: "hsc_test_1", task_id: SESSION_TASK, provider: "builtin:zai-coding-plan", model, issued_at: now, expires_at: now + 300_000 };
 }
 
@@ -34,6 +56,7 @@ function makeManager(
   opts: { retryMs?: number; onEvent?: (message: string) => void } = {},
 ): HighspeedManager {
   const manager = new HighspeedManager({
+    accountId: "account-test",
     origin: "https://zcode.z.ai",
     models: ["glm-5.3", "glm-5.2", "glm-5.1"],
     fetchImpl,
@@ -58,11 +81,17 @@ async function until(cond: () => boolean): Promise<boolean> {
   return cond();
 }
 
+/** 抽卡请求（POST draw）与健康检查（GET …/healthy）分开计数。*/
+function isDraw(url: string): boolean {
+  return url.endsWith("/api/v1/highspeed/draw");
+}
+
 describe("HighspeedManager", () => {
   it("refreshes the idle window during held-card traffic before rejection", async () => {
     const clock = { now: 1_000_000 };
     let draws = 0;
-    const manager = makeManager((async () => {
+    const manager = makeManager((async (input: RequestInfo | URL) => {
+      if (!isDraw(String(input))) return healthyResponse();
       draws++;
       return drawResponse({ ...hitCard(clock.now), expires_at: clock.now + 900_000 });
     }) as unknown as typeof fetch, clock);
@@ -75,55 +104,92 @@ describe("HighspeedManager", () => {
     manager.dropCard("upstream_rejected");
     expect(await until(() => draws === 2)).toBe(true);
   });
+
   it("draws on the first eligible request and holds the single card slot", async () => {
     const clock = { now: 1_000_000 };
     const calls: DrawCall[] = [];
     const manager = makeManager((async (input: RequestInfo | URL, init?: RequestInit) => {
-      calls.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown>, headers: new Headers(init?.headers) });
-      return drawResponse(hitCard(clock.now));
+      const url = String(input);
+      calls.push({ url, method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {}, headers: new Headers(init?.headers) });
+      return isDraw(url) ? drawResponse(hitCard(clock.now)) : healthyResponse();
     }) as unknown as typeof fetch, clock);
 
     manager.onRequest("glm-5.1", SESSION_TASK, AUTH);
     await settle();
     const card = manager.activeCard();
     expect(card?.cardId).toBe("hsc_test_1");
-    expect(card?.model).toBe("glm-5.3-highspeed");
+    expect(card?.model).toBe("glm-5.3");
 
     // second eligible request while holding → no new draw
     manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
     await settle();
-    expect(calls.length).toBe(1);
+    expect(calls.filter((c) => isDraw(c.url)).length).toBe(1);
 
-    // draw request shape: auth trio + body fields (official contract)
-    expect(calls[0]!.url).toBe(DRAW_URL);
-    expect(calls[0]!.headers.get("authorization")).toBe("Bearer test-jwt");
-    expect(calls[0]!.headers.get("x-bigmodel-authorization")).toBe("Bearer testkey.testsecret");
-    expect(calls[0]!.headers.get("bigmodel-target-type")).toBe("PERSONAL");
-    expect(calls[0]!.headers.get("x-request-id")).toMatch(/^[0-9a-f-]{36}$/);
-    expect(calls[0]!.body.task_id).toBe(SESSION_TASK);
-    expect(calls[0]!.body.provider).toBe("builtin:zai-coding-plan");
-    expect(calls[0]!.body.model).toBe("glm-5.1");
+    // draw request shape: Coding Plan dual JWT + account identity + body fields
+    const draw = calls.filter((c) => isDraw(c.url))[0]!;
+    expect(draw.url).toBe(DRAW_URL);
+    expect(draw.method).toBe("POST");
+    expect(draw.headers.get("authorization")).toBe("Bearer test-jwt");
+    expect(draw.headers.get("x-bigmodel-authorization")).toBe("Bearer testkey.testsecret");
+    // PERSONAL 账号只带 Target-Type，不带 TEAM 的两个头
+    expect(draw.headers.get("bigmodel-target-type")).toBe("PERSONAL");
+    expect(draw.headers.get("bigmodel-organization")).toBeNull();
+    expect(draw.headers.get("bigmodel-project")).toBeNull();
+    expect(draw.headers.get("x-request-id")).toMatch(/^[0-9a-f-]{36}$/);
+    expect(draw.body.task_id).toBe(SESSION_TASK);
+    expect(draw.body.provider).toBe("builtin:zai-coding-plan");
+    // 抽卡 body 的 model 就是请求模型，没有任何改写
+    expect(draw.body.model).toBe("glm-5.1");
     // deviceMid omitted when not provided (makeManager passes none)
-    expect(calls[0]!.headers.get("x-device-mid")).toBeNull();
+    expect(draw.headers.get("x-device-mid")).toBeNull();
+  });
+
+  it("sends the four TEAM identity headers on draw and card requests", async () => {
+    const clock = { now: 1_000_000 };
+    const calls: DrawCall[] = [];
+    const manager = makeManager((async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {}, headers: new Headers(init?.headers) });
+      return isDraw(url) ? drawResponse(hitCard(clock.now, "glm-5.3")) : healthyResponse();
+    }) as unknown as typeof fetch, clock);
+
+    manager.onRequest("glm-5.3", SESSION_TASK, TEAM_AUTH);
+    expect(await until(() => manager.activeCard() !== null)).toBeTrue();
+
+    const draw = calls.find((c) => isDraw(c.url))!;
+    expect(draw.headers.get("bigmodel-target-type")).toBe("TEAM");
+    expect(draw.headers.get("bigmodel-organization")).toBe("org-1");
+    expect(draw.headers.get("bigmodel-project")).toBe("proj-1");
+    expect(draw.body.provider).toBe("builtin:bigmodel-coding-plan");
+
+    // 加速推理侧用同一套头 + 卡 ID（官方：两条路径同一套鉴权中间件）
+    const pairs = applyHighspeedCardHeaders([["content-type", "application/json"]], manager.activeCard()!, TEAM_AUTH);
+    expect(pairs.find(([k]) => k === "Bigmodel-Target-Type")?.[1]).toBe("TEAM");
+    expect(pairs.find(([k]) => k === "Bigmodel-Organization")?.[1]).toBe("org-1");
+    expect(pairs.find(([k]) => k === "Bigmodel-Project")?.[1]).toBe("proj-1");
+    expect(pairs.find(([k]) => k === "X-Highspeed-Card-ID")?.[1]).toBe("hsc_test_1");
   });
 
   it("sends X-Device-Mid on draws when provided (activity-gate 3001 fix, live 2026-10-12)", async () => {
     const clock = { now: 1_000_000 };
     const calls: DrawCall[] = [];
     const manager = new HighspeedManager({
+      accountId: "account-device",
       origin: "https://zcode.z.ai",
       models: ["glm-5.3"],
       deviceMid: "  e6e1ef31-b69a-496b-8428-ae909abc8904  ",
       fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
-        calls.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown>, headers: new Headers(init?.headers) });
-        return drawResponse(hitCard(clock.now));
+        const url = String(input);
+        calls.push({ url, method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {}, headers: new Headers(init?.headers) });
+        return isDraw(url) ? drawResponse(hitCard(clock.now)) : healthyResponse();
       }) as unknown as typeof fetch,
       now: () => clock.now,
     });
+    live.push(manager);
     manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
     await settle();
-    expect(calls.length).toBe(1);
-    expect(calls[0]!.headers.get("x-device-mid")).toBe("e6e1ef31-b69a-496b-8428-ae909abc8904");
+    const draw = calls.find((c) => isDraw(c.url))!;
+    expect(draw.headers.get("x-device-mid")).toBe("e6e1ef31-b69a-496b-8428-ae909abc8904");
   });
 
   it("draws synchronously on ignite: the first fetch starts before any await", () => {
@@ -136,6 +202,27 @@ describe("HighspeedManager", () => {
 
     manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
     expect(fetches).toBe(1); // fired within onRequest, not on a timer
+  });
+
+  it("defers the first draw by the account's phase offset (heartbeat stagger)", async () => {
+    const clock = { now: 1_000_000 };
+    let fetches = 0;
+    const manager = new HighspeedManager({
+      accountId: "account-phased",
+      origin: "https://zcode.z.ai",
+      models: ["glm-5.3"],
+      startDelayMs: 20,
+      retryMs: 5,
+      fetchImpl: (async () => {
+        fetches++;
+        return drawResponse(null);
+      }) as unknown as typeof fetch,
+      now: () => clock.now,
+    });
+    live.push(manager);
+    manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
+    expect(fetches).toBe(0); // 相位未到：循环已点燃但首抽推迟
+    expect(await until(() => fetches >= 1)).toBeTrue();
   });
 
   it("retries at the heartbeat cadence after a miss — server next_draw_at is ignored", async () => {
@@ -181,7 +268,7 @@ describe("HighspeedManager", () => {
     manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
     expect(await until(() => fetches >= 2)).toBeTrue();
     // 4 minutes into a long stream the SSE is still producing — that is
-    // activity, not idle (§H): the stream-end touch re-arms the 5min window.
+    // activity, not idle: the stream-end touch re-arms the 5min window.
     clock.now += 4 * 60_000;
     manager.noteActivity();
     clock.now += 4 * 60_000 + 1; // 8min after the request, 4min+1ms after the touch
@@ -203,7 +290,8 @@ describe("HighspeedManager", () => {
 
   it("re-ignites after idle-stop when a new request arrives", async () => {
     const clock = { now: 1_000_000 };
-    const manager = makeManager((async () => drawResponse(hitCard(clock.now))) as unknown as typeof fetch, clock);
+    const manager = makeManager((async (input: RequestInfo | URL) =>
+      isDraw(String(input)) ? drawResponse(hitCard(clock.now)) : healthyResponse()) as unknown as typeof fetch, clock);
 
     manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
     await settle();
@@ -221,7 +309,8 @@ describe("HighspeedManager", () => {
   it("keeps redrawing after the card expires mid-idle-window", async () => {
     const clock = { now: 1_000_000 };
     let draws = 0;
-    const manager = makeManager((async () => {
+    const manager = makeManager((async (input: RequestInfo | URL) => {
+      if (!isDraw(String(input))) return healthyResponse();
       draws++;
       return draws <= 4
         ? drawResponse(null)
@@ -242,12 +331,13 @@ describe("HighspeedManager", () => {
   it("blocks only the rejected model on draw 400 and keeps the account drawable (2026-10-14 flash finding)", async () => {
     const clock = { now: 1_000_000 };
     let calls = 0;
-    const manager = makeManager((async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const manager = makeManager((async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (!isDraw(String(input))) return healthyResponse();
       calls++;
       const body = JSON.parse(String(init?.body)) as { model: string };
       return body.model === "glm-5.3-flash"
         ? new Response(JSON.stringify({ code: 3001, msg: "parameter error", logid: "x" }), { status: 400 })
-        : drawResponse(hitCard(clock.now));
+        : drawResponse(hitCard(clock.now, body.model));
     }) as unknown as typeof fetch, clock);
 
     manager.onRequest("glm-5.3-flash", SESSION_TASK, AUTH);
@@ -264,17 +354,80 @@ describe("HighspeedManager", () => {
     expect(calls).toBe(2);
   });
 
-  it("never mounts a non-flash card on a flash request (tier guard)", async () => {
+  it("treats a card whose model differs from the request as invalid and drops it", async () => {
     const clock = { now: 1_000_000 };
-    const manager = makeManager((async () => drawResponse(hitCard(clock.now, "glm-5.3"))) as unknown as typeof fetch, clock);
+    let draws = 0;
+    const manager = makeManager((async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (!isDraw(String(input))) return healthyResponse();
+      draws++;
+      const requested = (JSON.parse(String(init?.body)) as { model: string }).model;
+      // 第一次故意回一张**别的**模型的卡（上游回错卡 / 会话模型已切换）
+      return drawResponse(hitCard(clock.now, draws === 1 ? "glm-5.3" : requested));
+    }) as unknown as typeof fetch, clock);
 
     manager.onRequest("glm-5.1", SESSION_TASK, AUTH);
-    expect(await until(() => manager.activeCard()?.cardId === "hsc_test_1")).toBeTrue();
+    expect(await until(() => manager.activeCard() !== null)).toBeTrue();
+    expect(manager.activeCard()?.model).toBe("glm-5.3");
 
-    // same tier (non-flash family) → mounts; flash → never (model-rewrite hazard)
-    expect(manager.activeCardFor("glm-5.2")?.cardId).toBe("hsc_test_1");
-    expect(manager.activeCardFor("glm-5.3-flash")).toBeNull();
-    expect(manager.activeCardFor("glm-5.1")).not.toBeNull();
+    // 卡上 model 与请求 model 不一致 = 无效卡，直接丢弃（绝不改写 body 去迁就它）
+    expect(manager.activeCardFor("glm-5.1")).toBeNull();
+    expect(manager.activeCard()).toBeNull();
+
+    // 丢弃后按请求模型重抽；一致才可用
+    expect(await until(() => manager.activeCardFor("glm-5.1") !== null)).toBeTrue();
+    expect(draws).toBeGreaterThanOrEqual(2);
+  });
+
+  it("matches card models case-insensitively (官方目录写 GLM-5.3)", async () => {
+    const clock = { now: 1_000_000 };
+    const manager = makeManager((async (input: RequestInfo | URL) =>
+      isDraw(String(input)) ? drawResponse(hitCard(clock.now, "GLM-5.3")) : healthyResponse()) as unknown as typeof fetch, clock);
+
+    manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
+    expect(await until(() => manager.activeCard() !== null)).toBeTrue();
+    expect(manager.activeCardFor("glm-5.3")?.cardId).toBe("hsc_test_1");
+  });
+
+  it("health-checks the card on obtain and again at expiry — statistics only", async () => {
+    const clock = { now: 1_000_000 };
+    const healthy: string[] = [];
+    let draws = 0;
+    const manager = makeManager((async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (!isDraw(url)) {
+        healthy.push(url);
+        return healthyResponse();
+      }
+      draws++;
+      return draws === 1 ? drawResponse(hitCard(clock.now)) : drawResponse(null);
+    }) as unknown as typeof fetch, clock);
+
+    manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
+    expect(await until(() => manager.usageOf("hsc_test_1") !== undefined)).toBeTrue();
+    // 官方路径：GET {origin}/api/v1/highspeed/{cardId}/healthy
+    expect(healthy[0]).toBe("https://zcode.z.ai/api/v1/highspeed/hsc_test_1/healthy");
+    expect(manager.usageOf("hsc_test_1")?.completionTokens).toBe(22);
+    expect(manager.usageOf("hsc_test_1")?.promptTokens).toBe(11);
+
+    // 卡到期：再查一次（官方在卡到期后补采卡级用量）
+    clock.now += 300_001;
+    expect(manager.activeCard()).toBeNull();
+    expect(await until(() => healthy.length === 2)).toBeTrue();
+  });
+
+  it("ignores health-check failures — the card still works (statistics only)", async () => {
+    const clock = { now: 1_000_000 };
+    const events: string[] = [];
+    const manager = makeManager((async (input: RequestInfo | URL) => {
+      if (!isDraw(String(input))) throw new Error("healthy endpoint down");
+      return drawResponse(hitCard(clock.now));
+    }) as unknown as typeof fetch, clock, { onEvent: (m) => events.push(m) });
+
+    manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
+    expect(await until(() => manager.activeCard()?.cardId === "hsc_test_1")).toBeTrue();
+    await settle();
+    expect(manager.usageOf("hsc_test_1")).toBeUndefined(); // 没有采到用量，但卡照常可用
+    expect(events.some((m) => m.includes("health check failed"))).toBeTrue();
   });
 
   it("backs off 5s on HTTP 429, then resumes the heartbeat (2026-10-14 calibrated)", async () => {
@@ -337,7 +490,9 @@ describe("HighspeedManager", () => {
   it("deduplicates concurrent draws into a single fetch", async () => {
     const clock = { now: 1_000_000 };
     let fetches = 0;
-    const manager = makeManager((async () => {
+    const manager = makeManager((async (input: RequestInfo | URL) => {
+      // 健康检查走同一个 fetch，不算抽卡次数
+      if (!isDraw(String(input))) return healthyResponse();
       fetches++;
       await new Promise((r) => setTimeout(r, 10));
       return drawResponse(hitCard(clock.now));
@@ -351,10 +506,11 @@ describe("HighspeedManager", () => {
     expect(fetches).toBe(1);
   });
 
-  it("drops the card on upstream rejection and redraws immediately", async () => {
+  it("drops the card on upstream failure and redraws immediately", async () => {
     const clock = { now: 1_000_000 };
     let fetches = 0;
-    const manager = makeManager((async () => {
+    const manager = makeManager((async (input: RequestInfo | URL) => {
+      if (!isDraw(String(input))) return healthyResponse();
       fetches++;
       return drawResponse(hitCard(clock.now));
     }) as unknown as typeof fetch, clock);
@@ -372,11 +528,12 @@ describe("HighspeedManager", () => {
   it("redraws with the current account's auth after a cross-account card rejection", async () => {
     const clock = { now: 1_000_000 };
     const calls: DrawCall[] = [];
-    const authA: HighspeedAuth = { jwt: "jwt-account-a", codingPlanAuth: "keyA.secret", family: "zai" };
-    const authB: HighspeedAuth = { jwt: "jwt-account-b", codingPlanAuth: "keyB.secret", family: "bigmodel" };
+    const authA: HighspeedAuth = { jwt: "jwt-account-a", codingPlanAuth: "keyA.secret", family: "zai", identity: { targetType: "PERSONAL"  } };
+    const authB: HighspeedAuth = { jwt: "jwt-account-b", codingPlanAuth: "keyB.secret", family: "bigmodel", identity: { targetType: "PERSONAL"  } };
     const manager = makeManager((async (input: RequestInfo | URL, init?: RequestInit) => {
-      calls.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown>, headers: new Headers(init?.headers) });
-      return drawResponse(hitCard(clock.now));
+      const url = String(input);
+      calls.push({ url, method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {}, headers: new Headers(init?.headers) });
+      return isDraw(url) ? drawResponse(hitCard(clock.now)) : healthyResponse();
     }) as unknown as typeof fetch, clock);
 
     // account A ignites the loop and holds the card
@@ -384,18 +541,19 @@ describe("HighspeedManager", () => {
     await settle();
     expect(manager.activeCard()?.cardId).toBe("hsc_test_1");
 
-    // credential switch (proxy restart keeps the manager alive): B's requests
-    // early-return while the card is held — `latest` must still move to B
+    // credential switch: B's requests early-return while the card is held —
+    // `latest` must still move to B so the redraw uses B's auth
     manager.onRequest("glm-5.3", SESSION_TASK, authB);
     await settle();
-    expect(calls.length).toBe(1); // held card suppresses drawing
+    expect(calls.filter((c) => isDraw(c.url)).length).toBe(1); // held card suppresses drawing
 
     // upstream rejects B's use of A's card → selectionFallback redraw
     manager.dropCard("upstream_rejected");
-    expect(await until(() => calls.length >= 2)).toBeTrue();
-    expect(calls[1]!.headers.get("authorization")).toBe("Bearer jwt-account-b");
-    expect(calls[1]!.headers.get("x-bigmodel-authorization")).toBe("Bearer keyB.secret");
-    expect(calls[1]!.body.provider).toBe("builtin:bigmodel-coding-plan");
+    expect(await until(() => calls.filter((c) => isDraw(c.url)).length >= 2)).toBeTrue();
+    const redraw = calls.filter((c) => isDraw(c.url))[1]!;
+    expect(redraw.headers.get("authorization")).toBe("Bearer jwt-account-b");
+    expect(redraw.headers.get("x-bigmodel-authorization")).toBe("Bearer keyB.secret");
+    expect(redraw.body.provider).toBe("builtin:bigmodel-coding-plan");
   });
 
   it("skips drawing without a JWT and matches only configured model prefixes", () => {
@@ -436,13 +594,6 @@ describe("HighspeedManager", () => {
 });
 
 describe("highspeed helpers", () => {
-  it("rewriteBodyModel swaps the model field and tolerates non-JSON", () => {
-    expect(rewriteBodyModel('{"model":"glm-5.1","messages":[]}', "glm-5.3-highspeed"))
-      .toBe('{"model":"glm-5.3-highspeed","messages":[]}');
-    expect(rewriteBodyModel("not json", "glm-5.3-highspeed")).toBe("not json");
-    expect(rewriteBodyModel('{"messages":[]}', "x")).toBe('{"messages":[]}');
-  });
-
   it("applyHighspeedCardHeaders swaps the coding-plan dual auth and appends the card set", () => {
     const pairs: UpstreamHeaderPair[] = [
       ["content-type", "application/json"],
@@ -450,21 +601,68 @@ describe("highspeed helpers", () => {
       ["authorization", "Bearer testkey.testsecret"],
     ];
     const out = applyHighspeedCardHeaders(pairs, {
-      cardId: "hsc_1", taskId: "t", model: "glm-5.3-highspeed", issuedAt: 0, expiresAt: 1,
+      cardId: "hsc_1", taskId: "t", model: "glm-5.3", issuedAt: 0, expiresAt: 1,
     }, AUTH);
     expect(out.find(([k]) => k.toLowerCase() === "x-api-key")?.[1]).toBe("test-jwt");
     expect(out.find(([k]) => k.toLowerCase() === "authorization")?.[1]).toBe("Bearer test-jwt");
     expect(out.find(([k]) => k === "X-Bigmodel-Authorization")?.[1]).toBe("Bearer testkey.testsecret");
     expect(out.find(([k]) => k === "Bigmodel-Target-Type")?.[1]).toBe("PERSONAL");
+    // PERSONAL 不带 TEAM 的两个头
+    expect(out.find(([k]) => k === "Bigmodel-Organization")).toBeUndefined();
+    expect(out.find(([k]) => k === "Bigmodel-Project")).toBeUndefined();
     expect(out.find(([k]) => k === "X-Highspeed-Card-ID")?.[1]).toBe("hsc_1");
+    // 追加三个头（X-Bigmodel-Authorization / Target-Type / 卡 ID）：Authorization 是
+    // **替换**而不是追加，否则线上会出现 `Bearer x, Bearer x`。
     expect(out.length).toBe(pairs.length + 3);
+    expect(out.filter(([k]) => k.toLowerCase() === "authorization").length).toBe(1);
   });
 
-  it("isHighspeedCardRejection matches 401 and biz-3402 envelopes only", async () => {
-    expect(await isHighspeedCardRejection(new Response("nope", { status: 401 }))).toBeTrue();
-    expect(await isHighspeedCardRejection(new Response(JSON.stringify({ code: 3402, msg: "highspeed_card_expired" }), { status: 400 }))).toBeTrue();
-    expect(await isHighspeedCardRejection(new Response(JSON.stringify({ code: 3007 }), { status: 400 }))).toBeFalse();
-    expect(await isHighspeedCardRejection(new Response("data: hi\n\n", { status: 200, headers: { "content-type": "text/event-stream" } }))).toBeFalse();
-    expect(await isHighspeedCardRejection(new Response("plain", { status: 400 }))).toBeFalse();
+  it("highspeedAuthHeaders normalises the Bearer prefixes and emits TEAM org/project", () => {
+    expect(highspeedAuthHeaders({ ...AUTH, jwt: "Bearer already" })).toMatchObject({
+      "Authorization": "Bearer already",
+      "Bigmodel-Target-Type": "PERSONAL",
+    });
+    const team = highspeedAuthHeaders(TEAM_AUTH);
+    expect(team["Authorization"]).toBe("Bearer team-jwt");
+    expect(team["X-Bigmodel-Authorization"]).toBe("Bearer teamkey.teamsecret");
+    expect(team["Bigmodel-Organization"]).toBe("org-1");
+    expect(team["Bigmodel-Project"]).toBe("proj-1");
+  });
+
+  it("isHighspeedFailure treats any non-2xx as a fallback trigger (official spec)", async () => {
+    expect(await isHighspeedFailure(new Response("nope", { status: 401 }))).toBeTrue();
+    expect(await isHighspeedFailure(new Response(JSON.stringify({ code: 3402, msg: "highspeed_card_expired" }), { status: 400 }))).toBeTrue();
+    expect(await isHighspeedFailure(new Response("", { status: 429 }))).toBeTrue();
+    expect(await isHighspeedFailure(new Response("boom", { status: 503 }))).toBeTrue();
+    expect(await isHighspeedFailure(new Response("data: hi\n\n", { status: 200, headers: { "content-type": "text/event-stream" } }))).toBeFalse();
+  });
+
+  it("highspeedAuthFrom reads the identity off the account", () => {
+    const personal = accountFor(zhipuCredential({ jwt: "jwt-1" }));
+    expect(highspeedAuthFrom(personal)).toEqual({
+      jwt: "jwt-1",
+      codingPlanAuth: "testkey.testsecret",
+      family: "zai",
+      identity: { targetType: "PERSONAL", organizationId: undefined, projectId: undefined },
+    });
+
+    const team = accountFor(zhipuCredential({
+      provider: "bigmodel",
+      apiKey: "teamkey",
+      secret: undefined,
+      jwt: "team-jwt",
+      identity: { targetType: "TEAM", organizationId: "org-9", projectId: "proj-9", productId: "prod-9", deviceMid: "test-device-mid" },
+    }));
+    expect(highspeedAuthFrom(team)).toEqual({
+      jwt: "team-jwt",
+      codingPlanAuth: "teamkey",
+      family: "bigmodel",
+      identity: { targetType: "TEAM", organizationId: "org-9", projectId: "proj-9" },
+    });
+
+    // 缺 JWT
+    expect(highspeedAuthFrom(accountFor(zhipuCredential({ jwt: undefined })))).toBeNull();
+    // zai 缺 secret（apiKey 对不完整）
+    expect(highspeedAuthFrom(accountFor(zhipuCredential({ secret: undefined })))).toBeNull();
   });
 });
