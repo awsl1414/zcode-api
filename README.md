@@ -285,7 +285,8 @@ bun run dev         # 开发模式启动面板
 ## License
 
 Copyright (c) 2026 awsl1414 and the ZCode Proxy contributors.
-Based on ZCode Proxy by TriDefender and contributors.
+
+本项目是 [TriDefender/zcode-api](https://github.com/TriDefender/zcode-api) 的独立衍生版本：5.0 在原项目基础上做了大规模重构（多账号调度、网页面板、三协议网关），并在独立仓库维护，不再跟随上游分支。上游的版权与许可声明按 CC BY-NC-SA 4.0 的署名要求保留在下方与 [LICENSE](LICENSE) 中。
 
 本项目采用 **[CC BY-NC-SA 4.0（署名—非商业性使用—相同方式共享 4.0 国际）](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh-hans)**。[LICENSE](LICENSE) 收录未经修改的官方标准全文；文件开头为项目的版权与许可声明。
 

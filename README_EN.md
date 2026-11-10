@@ -283,7 +283,8 @@ keys.
 ## License
 
 Copyright (c) 2026 awsl1414 and the ZCode Proxy contributors.
-Based on ZCode Proxy by TriDefender and contributors.
+
+This project is an independent derivative of [TriDefender/zcode-api](https://github.com/TriDefender/zcode-api): 5.0 restructured it substantially (multi-account scheduling, a web panel, a three-protocol gateway) and is maintained in its own repository rather than tracking the upstream. The upstream copyright and license notice are kept below and in [LICENSE](LICENSE), as CC BY-NC-SA 4.0 attribution requires.
 
 This project uses **[Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/)**. [LICENSE](LICENSE) contains the unmodified official standard text, preceded by the project's copyright and license notice.
 
