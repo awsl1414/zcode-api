@@ -1,0 +1,630 @@
+/* ------------------------------------------------------------------------- */
+/* 聊天视图：原独立页的组件随视图进面板，与面板同一套 token 与组件；
+   会话栏成框体、选择器区折成 CollapsibleSection、
+   输入区带附件按钮与预览缩略条；三块的宽度 / 圆角 / 边界对齐全页基准。  */
+/* ------------------------------------------------------------------------- */
+
+/* 主布局：左会话栏 + 右聊天。窄屏（≤1024px）会话栏隐藏，折进 chat__sessionbar
+   的顶部下拉（断点规则在文件尾的媒体查询里）。列宽只给下限，不写死宽度。
+   align-items: stretch 让会话栏与右侧内容区同高。
+   这一层是 fill 链的一节（HTML 上带 `.fill-chain`）——行高必须写成
+   `minmax(0, 1fr)`，否则隐式行按内容高算，会话栏与对话区会把它顶回内容高，
+   高度就断在这里，下面的 .chat__log 永远拿不到剩余高度。 */
+.chat__layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: var(--space-5);
+  align-items: stretch;
+  min-height: 0;
+}
+
+.chat__main {
+  display: flex;
+  flex-direction: column;
+  /* 区块间距取基准 16px——选择器区（折叠体展开时）与消息区、消息区
+     与会话栏之间不再挤在一起。`min-height: 0` 是 fill 链的必经节点，
+     漏了它，选择器区的最小内容高会把消息区与输入区往下推。 */
+  gap: var(--space-5);
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 会话栏（宽屏）：与右侧面板同一套容器语言（1px --line 边界、
+   8px 圆角、白底），宽度与右侧两块面板的边界对齐——三块不再是三种框。
+   内部间距与列表行距同拍（4px）——新建按钮与列表项等宽等距；
+   标题是区块标签，多让一档。 */
+.chat__sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  min-height: 0;
+  padding: var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+}
+
+.chat__sidebar-title {
+  margin-bottom: var(--space-1);
+  color: var(--faint);
+  font-size: var(--text-meta);
+  font-weight: var(--weight-strong);
+}
+
+/* 会话列表占满框体余下高度（同高由 grid stretch 给），超出在列表内滚——
+   滚动发生在框体内部，框体高度不随会话数变。
+   新建按钮在这一层（与列表项同一个内容框）：按钮曾是它的兄弟节点，
+   一旦出现滚动条就比列表项宽一个滚动条宽。两者在同一个内容框里，才会一起
+   被收窄。 */
+.chat__session-list {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 列表项的容器：`renderSessions` 只清这一层，sticky 的新建按钮留在原地。 */
+.chat__session-items {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* 一条会话：当前会话用 accent 描边（与用户气泡同一套语义色）。
+   密度：内边距 8px 纵向（行高 ≈ 39px）、16px 横向——长列表「新会话 1 分钟前」
+   连成一屏时不鼓；整行可点，点击面积不受影响。标题 14px（meta）、
+   时间戳 13px（micro），半档层次不变。 */
+.chat__session {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel-alt);
+  cursor: pointer;
+}
+
+.chat__session[data-current="true"] {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+/* 会话项自己就是键盘入口（`role="button"` + `tabindex="0"`）：焦点环由全局
+   `:focus-visible` 画，这里只把轮廓收进盒子，免得它被会话栏的边界裁掉。 */
+.chat__session:focus-visible {
+  outline-offset: -2px;
+}
+
+.chat__session-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat__session-time {
+  flex-shrink: 0;
+  color: var(--faint);
+  font-size: var(--text-micro);
+}
+
+/* 删除是行内的小 ×：hover 才亮起 danger 色，平时安静。
+   点击面积（桌面图标按钮的可点高度不低于控件高）：字形与内边距不动
+   （紧凑的行高是有意的，按钮盒子长大会把行撑高），用一层
+   不绘制任何东西的 `::before` 把命中区外扩到 `--control-height`（36×36）。
+   外扩后上下各比行多出几像素，落在 4px 的行间隙里——那里本来不属于任何一行，
+   归谁都不算误点。窄屏抬到 44×44 的规则在 base.css 末尾的共享命中区块。 */
+.chat__session-delete {
+  position: relative;
+  flex-shrink: 0;
+  padding: 0 var(--space-1);
+  border: none;
+  background: none;
+  color: var(--faint);
+  font-size: var(--text-meta);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chat__session-delete::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 0;
+  width: var(--control-height);
+  height: var(--control-height);
+  transform: translateY(-50%);
+}
+
+.chat__session-delete:hover {
+  color: var(--danger);
+}
+
+/* 双击标题后的重命名输入框：占同一个位置，Enter / 失焦提交，Esc 取消。 */
+.chat__rename {
+  flex: 1;
+  min-width: 0;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-meta);
+}
+
+/* 窄屏的会话条：宽屏不渲染（display:none），断点内替换左侧会话栏。 */
+.chat__sessionbar {
+  display: none;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.chat__sessionbar .select {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 层级选择：整个选择器区是一个 `.collapse`
+   容器（圆角 / 边界 / 内边距与面板同档），标题行是
+   「连接」+ 当前组合的摘要。四层下拉在体内两行两列，窄屏降一列
+   （不写固定宽度，英文比中文长也不裁字）。key 行常驻可见——它是归因工具，不能因为面板
+   会话可用就收起来。 */
+.chat__settings {
+  padding: var(--space-5);
+}
+
+.chat__settings-summary {
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 折叠体内是四层选择器的字段格：骨架与全项目同一套（`.field-grid` >
+   `.field-cell`），这一块宽屏也只有两列，`chat__settings-grid` 只是它的钩子
+   （`page.test.ts` 按它核对聊天页的字段格，样式全部来自 `.field-grid`）。 */
+.chat__settings-grid {
+  gap: var(--space-4);
+}
+
+/* 手动粘贴行横跨两列：完整 key 输入框 + 记住勾选 + 使用按钮。 */
+.chat__keymanual {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.chat__keymanual .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat__keyremember {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--faint);
+  font-size: var(--text-meta);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* 说明块（key 归因）在折叠体内独占一行（`.hint` 基准样式自带颜色与限宽）。 */
+.chat__settings-hint {
+  max-width: none;
+}
+
+/* 对话面板：fill 链的最后一节容器（HTML 上带 `.fill-chain`）。
+   三块里只有消息区伸缩：空态与输入区都是固定块，所以任何高度下输入框都在。 */
+.chat__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-height: 0;
+}
+
+/* 空态可以让步：它没有内容可读，而输入区是这页的唯一交互。面板被挤到
+   极短时（矮窗 + 窄宽 + 连接区展开），先压空态、再压消息区，输入框留在视口里。
+   不做这条规则时，空态与输入区的固定高之和就是面板的下限——矮窗下整页被顶出
+   视口（实测 700×800 + 展开连接区，输入框底部 864 > 800）。 */
+.chat__panel > .empty {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 对话区：它是日志页 `.log` 的同一个角色——`fill-region`（吃满剩余高度并自己滚）。
+   高度估算（`height: max(460px, calc(100vh - 460px))`）在这里不成立：460px 是
+   「顶栏 + 页头 + 横幅 + 选择器 + 输入区」的**估算总和**，选择器展开、横幅出现、
+   窗口变矮都会让估算落空（矮视口下输入框掉到屏幕下沿）。高度由壳算出来。
+
+   踩过的坑：注释漏了收尾符时，**整条 `.chat__log` 规则会被下一个注释的收尾吞掉**
+   ——`display: flex` 与 `gap` 不生效，消息区退化成普通块级堆叠、气泡之间没有
+   间隔，看起来像尺寸档位的问题。`page.test.ts` 里那条「注释不能吞规则」的用例
+   钉住这类事故。 */
+.chat__log {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* 一条消息：左对齐是模型，右对齐是用户。方向是布局，不是颜色，所以深浅色通用。
+   纵向内边距 12px（`--space-3`），与 `.chat__log` 的行距同档——
+   气泡之间的白与气泡内的白拉开一级，连续几条短消息不再读成一整块。 */
+.chat__msg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-width: 88%;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel-alt);
+}
+
+.chat__msg--user {
+  align-self: flex-end;
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.chat__msg--assistant {
+  align-self: flex-start;
+}
+
+.chat__role {
+  color: var(--faint);
+  font-size: var(--text-micro);
+  font-weight: var(--weight-strong);
+}
+
+/* 正文保留换行与空格（代码块式的回答不能被打散），长串允许折行。 */
+.chat__body {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 气泡内的附件区：图片缩略图（点击开原图）与文件芯片。空附件不渲染
+   容器，布局上无痕。 */
+.chat__msg-media {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.chat__msg-imglink {
+  display: block;
+  line-height: 0;
+}
+
+.chat__msg-img {
+  display: block;
+  max-width: 200px;
+  max-height: 150px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.chat__msg-img--ph {
+  display: grid;
+  place-items: center;
+  width: 96px;
+  height: 72px;
+  color: var(--faint);
+  background: var(--panel-alt);
+}
+
+.chat__msg-img--ph .btn__icon {
+  width: var(--layout-icon);
+  height: var(--layout-icon);
+}
+
+/* 文件芯片：等宽文件名（文件名是标识符，与 reqId 同一规则）+ 图标。 */
+.chat__filechip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 260px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: var(--text-micro);
+  line-height: var(--tag-height);
+}
+
+.chat__filechip .btn__icon {
+  flex-shrink: 0;
+  width: var(--icon-xs);
+  height: var(--icon-xs);
+}
+
+.chat__filechip-name {
+  overflow: hidden;
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 输入区：一条上边界把消息区与输入区分成两个面——预览缩略条 /
+   附件按钮 + 输入框 / 状态 + 发送三层都在线下，内边距把三层从边界撑开，
+   不与上方内容挤在一起。 */
+.chat__composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--line);
+  /* 贴底：输入区是 fill 页的固定块，永远贴在面板下沿。空态时消息区
+     （`.chat__log`）被 `syncEmptyState` 整个藏起来，此时面板里没有会长大的
+     弹性项——`margin-top: auto` 把剩余高度全放在输入区上方，输入框不会滞在
+     面板中间。有消息时弹性的日志区已经吃掉空间，这个 auto 归零，不重复占位。 */
+  margin-top: auto;
+}
+
+/* 文件选择器本体永远不可见（附件按钮去点它）；happy-dom / 浏览器都尊重
+   display:none 的 input 不弹窗。 */
+.chat__fileinput {
+  display: none;
+}
+
+/* 预览缩略条：待发送的附件芯片。缩略图在输入框上方，先看再发——
+   「发了才发现附错」比「发送前多看一眼」贵得多。空的时候整条隐藏。 */
+.chat__previews {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* 图片芯片：方形缩略图 + 右上角移除。缩略图缺失（画布不可用 / 非图）时
+   显图标占位。 */
+.chat__preview {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-alt);
+  overflow: hidden;
+}
+
+.chat__preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* 占位（无缩略图时）：居中的图标。独立于 img 规则，不靠 !important 翻案。 */
+.chat__preview .chat__preview-ph {
+  display: grid;
+  place-items: center;
+  color: var(--faint);
+}
+
+.chat__preview-ph .btn__icon {
+  width: var(--layout-icon);
+  height: var(--layout-icon);
+}
+
+/* 移除按钮压在芯片右上角：小方块，hover 亮起 danger（与会话删除同一条语义）。
+   命中区由不绘制的 `::before` 扩到 36×36（桌面口径）；
+   窄屏抬到 44×44 的规则在 base.css 末尾的共享命中区块，不在这里再写一条）。
+   行高取 `--leading`：13px 的字形在 1.5 下撑出 19.5px 的盒高，与 20px 的视觉
+   尺寸对得上；1.4 是脱离 token 的第二个值，没有理由。 */
+.chat__preview-remove {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 0 var(--space-1);
+  border: none;
+  border-radius: 0 0 0 var(--radius-sm);
+  background: var(--panel);
+  color: var(--faint);
+  font-size: var(--text-micro);
+  line-height: var(--leading);
+  cursor: pointer;
+}
+
+.chat__preview-remove::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: var(--control-height);
+  height: var(--control-height);
+}
+
+
+.chat__preview-remove:hover {
+  color: var(--danger);
+}
+
+/* 文件芯片：图标 + 文件名（截断），同一套框——两种芯片在一条里
+   不打架。 */
+.chat__preview--file {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  width: auto;
+  max-width: 200px;
+  height: auto;
+  min-height: var(--control-height);
+  padding: var(--space-1) var(--space-4);
+  padding-right: var(--space-6);
+  color: var(--muted);
+  font-size: var(--text-meta);
+}
+
+.chat__preview--file .btn__icon {
+  flex-shrink: 0;
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+}
+
+.chat__preview-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 输入行：附件按钮 + 输入框。按钮贴输入框左缘，同一行的上缘对齐（
+   `align-items: flex-start`）：36px 方形与 `--control-height` 同高，与输入框
+   第一行控件对齐。`.btn` 的 64px 最小宽会把方形撑成胶囊，`.btn--icon` 的
+   `min-width: 0` 负责把它收回来。 */
+.chat__inputrow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+/* 输入框本体：宽 = 消息区宽（面板内容框），发送/停止贴在它右下角内侧。
+   发送键放在输入框下单独一行、靠面板最右边时，看起来不属于这个输入区
+   （用户实测「发送按钮孤立」）。 */
+.chat__field {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.chat__field .field--area {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* 底部留出操作行的高度 + 两个 8px（操作行自己的 8px 下内边距与文字避让） */
+  padding-bottom: calc(var(--control-height) + var(--space-4));
+}
+
+/* 附件按钮：muted 色的线性回形针，hover / 键盘聚焦亮起——
+   工具按钮安静、逐级点亮，不与发送键抢视觉。 */
+.chat__attach {
+  color: var(--muted);
+}
+
+.chat__attach:hover,
+.chat__attach:focus-visible {
+  color: var(--text);
+}
+
+/* 新建按钮的粘性槽位：列表滚长时按钮留在顶部。
+   为什么是槽位而不是把 `position: sticky` 写在按钮上：槽位带不透明背景与 4px
+   下留白，滚上来的会话项在它的下沿被整齐地剪掉；直接粘按钮时，项会紧贴着按钮
+   底边被剖成两半（实测看着就像重叠）。 */
+.chat__new-slot {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  flex: 0 0 auto;
+  padding-bottom: var(--space-1);
+  background: var(--panel);
+}
+
+/* 新建会话按钮：会话栏同宽的长方形，居中一个加号——与列表项
+   等宽等距，读作列表的第一个条目。图标比正文按钮大一号（18px），与导航
+   图标同档；颜色同样 muted 常态、hover 亮起。
+   按钮在滚动的列表里，`flex: 0 0 auto` 是必需的——放在列表的兄弟
+   节点上时，列表项多到顶破框体，它作为弹性项会被压成 29px 高（实测）。 */
+.chat__new {
+  display: flex;
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  color: var(--muted);
+}
+
+.chat__new .btn__icon {
+  width: var(--layout-icon);
+  height: var(--layout-icon);
+}
+
+.chat__new:hover,
+.chat__new:focus-visible {
+  color: var(--text);
+}
+
+.chat__actions {
+  /* 操作行浮在输入框内部：左侧状态文案，右侧停止/发送——与输入框共一个
+     框，不再占面板宽度。绝对定位让它们坐在输入框右下角内侧，输入框宽度不变。 */
+  position: absolute;
+  right: var(--space-3);
+  bottom: var(--space-2);
+  left: var(--space-3);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* 生成中 / 已停止的状态文案：占住左侧空间，把两个按钮推到右边。 */
+.chat__status {
+  flex: 1;
+  color: var(--faint);
+  font-size: var(--text-meta);
+}
+
+/* 窄屏断点：会话栏折进顶部下拉、四层降一列。
+   1024 与设置页网格的单列断点、900 与面板并排的断点同属三档规则（表单 /
+   双栏取 1024、面板并排取 900）。1001–1024 这一小段视口按 1024 处理——那一档
+   会话栏本就已经挤到只剩 180px。 */
+@media (max-width: 1024px) {
+  .chat__layout {
+    grid-template-columns: 1fr;
+  }
+
+  .chat__sidebar {
+    display: none;
+  }
+
+  .chat__sessionbar {
+    display: flex;
+  }
+}
+
+@media (max-width: 720px) {
+  .chat__msg {
+    max-width: 100%;
+  }
+}
+
+/*
+ * 窄屏：移除键自己长成 44×44 的方块。
+ *
+ * 芯片是 `overflow: hidden` 的，伪元素以盒心铺开时有一半会被裁掉（实测
+ * elementFromPoint 在角上读到的是芯片本体）。所以窄屏不放伪元素，直接把按钮
+ * 盒子做成 44×44 贴在芯片右上角，并把芯片的右内边距让到同宽（文字不被键压住）；
+ * 文件芯片的最小高度也一起抬到 44，键才不会比芯片高出一截而被裁。
+ *
+ * 伪元素在窄屏显式归零：桌面那条 36×36 会让 44 的盒子里多出一圈空响区。
+ */
+@media (max-width: 720px) {
+  .chat__preview--file {
+    min-height: var(--layout-touch-min);
+    padding-right: var(--layout-touch-min);
+    /* 文件芯片里没有需要按圆角裁的图；放开裁剪，44×44 的键在芯片圆角处
+       才不会被切掉两角（elementFromPoint 会读到芯片本体）。 */
+    overflow: visible;
+  }
+
+  .chat__preview-remove {
+    display: grid;
+    place-items: center;
+    width: var(--layout-touch-min);
+    height: var(--layout-touch-min);
+  }
+
+  .chat__preview-remove::before {
+    display: none;
+  }
+}

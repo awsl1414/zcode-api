@@ -1,0 +1,189 @@
+          <!-- ④ 日志页：两个 tab。
+               系统 tab：`GET /api/events` 的实时流 + 客户端过滤 + 暂停回放 +
+               连续重复行折叠计数；
+               请求事件 tab：`RequestRecord` 十四列表格（对标请求日志参考稿，
+               含缓存 / 推理强度 / 重试三列），初始加载走 `getRequests`，增量靠
+               `request` 事件，点行展开阶段时间线。两个 tab 共享过滤器区
+               的位置，各有一套控件。 -->
+          <div class="page dense" data-view="logs" hidden>
+            <header class="page-header">
+              <div class="page-header__heading">
+                <h1 class="page-title" data-i18n="nav.logs">日志</h1>
+              </div>
+            </header>
+            <div class="page-body page-body--fill">
+
+            <div class="tabs" role="tablist" data-role="log-tabs">
+              <button type="button" class="tab tab--active" role="tab" aria-selected="true" data-log-tab="requests" data-i18n="logs.tab.requests">请求事件</button>
+              <button type="button" class="tab" role="tab" aria-selected="false" data-log-tab="system" data-i18n="logs.tab.system">系统</button>
+            </div>
+
+            <!-- 系统 tab 的筛选条，**固定两行**：第一行三个筛选下拉，
+                 第二行左半边搜索、右半边连接状态与回放按钮。
+                 两行都不靠内容宽度折行——断点写在列数上（`.toolbar--filters`），
+                 系统 tab 三列、请求事件 tab 六列，窄屏统一折成三列。
+                 动作组整组不拆、靠 `margin-left: auto` 钉在第二行右缘
+                 （`.toolbar__group--end`）。-->
+            <!-- 请求事件是默认 tab，静态 DOM 与它一致（过滤器行与内容面板
+                 都落在请求事件这边；系统 tab 的两块反过来隐藏）。进页面的显隐由
+                 app-view-logs.js 的 enter() 再对齐一次（顺带触发请求 tab 的初始
+                 加载），这里保持首屏（JS 跑起来之前）不闪到另一边。 -->
+            <div class="toolbar toolbar--filters" data-role="log-filters-system" hidden>
+              <div class="toolbar__group toolbar__group--fields">
+                <div class="field-cell field-cell--inline">
+                  <label class="field-cell__label" for="log-account" data-i18n="logs.account">账号</label>
+                  <select class="select" id="log-account" data-role="log-account"></select>
+                </div>
+                <div class="field-cell field-cell--inline">
+                  <label class="field-cell__label" for="log-level" data-i18n="logs.level">级别</label>
+                  <select class="select" id="log-level" data-role="log-level"></select>
+                </div>
+                <!-- 模块过滤：选项来自已经收到的条目，所以不在启动时填死。
+                     服务端不参与过滤，这里只是把哪些行可见切一切。 -->
+                <div class="field-cell field-cell--inline">
+                  <label class="field-cell__label" for="log-mod" data-i18n="logs.mod">模块</label>
+                  <select class="select" id="log-mod" data-role="log-mod"></select>
+                </div>
+              </div>
+              <!-- 第二行左半边：搜索框与上方筛选下拉同一个骨架（标签在左、
+                   控件吃满本格）。它**不在** `--fields` 组里——留在组内就会跟着
+                   下拉一起按内容宽度折行，正是「key 与搜索分居两行」那类折行的来源。 -->
+              <div class="field-cell field-cell--inline toolbar__search">
+                <label class="field-cell__label" for="log-search" data-i18n="logs.search">搜索</label>
+                <input
+                  class="field"
+                  id="log-search"
+                  type="search"
+                  data-role="log-search"
+                  data-i18n-attr="placeholder:logs.searchHint"
+                />
+              </div>
+              <!-- 动作组：连接状态 + 暂停 / 清空。连接状态与这两个按钮是同一件事
+                   的两面（“这条流是活的吗、要不要停下来”），所以留在同一组里。 -->
+              <div class="toolbar__group toolbar__group--end">
+                <!-- 连接状态：连接中（首屏）/ 已连接 / 重连中 / 断开。
+                     「连接中」只在首拍之前出现，之后只会落在其余三态之一。 -->
+                <span class="status">
+                  <span class="status__dot status__dot--danger" data-role="log-conn-dot"></span>
+                  <span data-role="log-conn" data-i18n="logs.conn.connecting">连接中…</span>
+                </span>
+                <button type="button" class="btn" data-action="toggle-pause" data-role="log-pause" data-i18n="logs.pause">
+                  暂停
+                </button>
+                <button type="button" class="btn" data-action="clear-logs" data-i18n="logs.clear">清空</button>
+              </div>
+            </div>
+
+            <!-- 请求事件 tab 的筛选条（对标参考稿）：状态 / 阶段 / 账号 / 路由 /
+                 模型 / key 六个下拉 + 文本搜索。路由选项是稳定枚举（技术标识不翻译）；
+                 阶段 / 账号 / 模型 / key 的选项由 `app-view-logs.js` 按已见记录
+                 聚合（阶段 = `failedStage`）。暂停与
+                 清空在这里也各有一份：暂停只停渲染，清空只清本页的视图缓冲，不动
+                 服务端的 `RequestStore`。
+                 六列等分第一行（`.toolbar--filters` 的列模板，不按内容分配：key 的
+                 选项少，按内容分它会比邻座窄一截，看着像错位）；搜索在第二行左半边，
+                 动作组在右半边。 -->
+            <div class="toolbar toolbar--filters" data-role="log-filters-requests">
+              <div class="toolbar__group toolbar__group--fields">
+                <div class="field-cell field-cell--inline">
+                  <label class="field-cell__label" for="req-status" data-i18n="logs.requests.status">状态</label>
+                  <select class="select" id="req-status" data-role="req-status"></select>
+                </div>
+                <div class="field-cell field-cell--inline">
+                  <label class="field-cell__label" for="req-stage" data-i18n="logs.requests.stage">阶段</label>
+                  <select class="select" id="req-stage" data-role="req-stage"></select>
+                </div>
+                <div class="field-cell field-cell--inline">
+                  <label class="field-cell__label" for="req-account" data-i18n="logs.account">账号</label>
+                  <select class="select" id="req-account" data-role="req-account"></select>
+                </div>
+                <div class="field-cell field-cell--inline">
+                  <label class="field-cell__label" for="req-route" data-i18n="logs.requests.route">路由</label>
+                  <select class="select" id="req-route" data-role="req-route"></select>
+                </div>
+                <div class="field-cell field-cell--inline">
+                  <label class="field-cell__label" for="req-model" data-i18n="logs.requests.model">模型</label>
+                  <select class="select" id="req-model" data-role="req-model"></select>
+                </div>
+                <div class="field-cell field-cell--inline">
+                  <label class="field-cell__label" for="req-key" data-i18n="logs.requests.key">key</label>
+                  <select class="select" id="req-key" data-role="req-key"></select>
+                </div>
+              </div>
+              <div class="field-cell field-cell--inline toolbar__search">
+                <label class="field-cell__label" for="req-search" data-i18n="logs.requests.search">搜索</label>
+                <input
+                  class="field"
+                  id="req-search"
+                  type="search"
+                  data-role="req-search"
+                  data-i18n-attr="placeholder:logs.requests.searchHint"
+                />
+              </div>
+              <!-- 动作组：导出 / 暂停 / 清空是一条动作序列，整组换行、整组靠右。 -->
+              <div class="toolbar__group toolbar__group--end">
+                <!-- 导出 JSON：当前筛选结果落成一个文件。默认下载目录由浏览器
+                     决定，页面不碰文件系统；筛选条件也写进文件，别人拿到能看出这是
+                     「哪一段」的切片。 -->
+                <button type="button" class="btn" data-action="export-requests" data-i18n="logs.requests.export">
+                  导出 JSON
+                </button>
+                <button type="button" class="btn" data-action="toggle-pause" data-role="req-pause" data-i18n="logs.pause">
+                  暂停
+                </button>
+                <button type="button" class="btn" data-action="clear-logs" data-i18n="logs.clear">清空</button>
+              </div>
+            </div>
+
+            <div class="banner banner--warn" data-role="log-paused" role="status" hidden>
+              <span data-i18n="logs.paused">已暂停：仍在后台接收，恢复后补齐。</span>
+            </div>
+
+            <!-- fill 模式：这一页的核心交互区是日志流，必须始终占满剩余高度，
+                 所以 page-body 不滚，滚的是下层的 .log。框体自己是 fill-chain（只传
+                 高度、不滚），这样面板的 1px 边界与内边距留在滚动区外面，滚动条不会
+                 压在框线上。 -->
+            <section class="panel fill-chain log-panel" data-role="log-panel-system" hidden>
+              <div class="log fill-region" data-role="log-lines"></div>
+              <div class="empty" data-role="log-empty" hidden data-i18n="logs.empty">还没有日志。</div>
+            </section>
+
+            <!-- 请求事件表（对标请求日志参考稿）：十四列。整行可点，
+                 展开阶段时间线与上游明细；状态列用 StatusBadge（2xx 绿 / 4xx 橙 / 5xx 红 /
+                 在飞琥珀 / 客户端断开中性）。行数上限与服务端同值（200）。
+                 列映射：账号 → 来源（色点 + 账号名）、路由·协议 → 请求（流式/批量
+                 + 端点路径），另有缓存 / 推理强度 / 重试三列。
+                 密集表是表格字号的唯一受控例外（`.table--dense`）——13px 的
+                 micro 档 + 40px 行高，否则 14px 下这张表在 1000px 窗口里必然挤。 -->
+            <section class="panel fill-chain log-panel" data-role="log-panel-requests">
+              <!-- 表格自己不是滚动容器（`display: block` 会毁掉列宽），外面套一层
+                   scroll 层：横向（十四列在 1000px 窗口里必然超宽）与纵向（行数上限
+                   200）都由它接管。 -->
+              <div class="table-scroll fill-region">
+                <table class="table table--dense" data-role="req-table">
+                  <caption class="table__caption" data-i18n="logs.tab.requests">请求事件</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col" data-i18n="logs.requests.col.time">时间</th>
+                      <th scope="col" data-i18n="logs.requests.col.reqId">reqId</th>
+                      <th scope="col" data-i18n="logs.requests.col.request">请求 / 端点</th>
+                      <th scope="col" data-i18n="logs.requests.col.source">来源</th>
+                      <th scope="col" data-i18n="logs.requests.col.model">模型</th>
+                      <th scope="col" data-i18n="logs.requests.col.status">状态</th>
+                      <th scope="col" data-i18n="logs.requests.col.latency">用时</th>
+                      <th scope="col" class="req__col--extra" data-i18n="logs.requests.col.cache">缓存</th>
+                      <th scope="col" class="req__col--extra" data-i18n="logs.requests.col.effort">推理强度</th>
+                      <th scope="col" class="req__col--extra" data-i18n="logs.requests.col.attempts">重试</th>
+                      <th scope="col" data-i18n="logs.requests.col.tps">tok/s</th>
+                      <th scope="col" data-i18n="logs.requests.col.tokens">tokens</th>
+                      <th scope="col" data-i18n="logs.requests.col.key">key</th>
+                      <th scope="col" data-i18n="logs.requests.col.error">错误</th>
+                    </tr>
+                  </thead>
+                  <tbody data-role="req-body"></tbody>
+                </table>
+              </div>
+              <div class="empty" data-role="req-empty" hidden data-i18n="logs.requests.empty">还没有请求记录。</div>
+            </section>
+            </div>
+          </div>

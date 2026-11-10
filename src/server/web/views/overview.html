@@ -1,0 +1,164 @@
+          <!-- ① 概览：风控横幅、四张指标卡、并发曲线、账号摘要。 -->
+          <div class="page comfortable" data-view="overview">
+            <header class="page-header">
+              <div class="page-header__heading">
+                <h1 class="page-title" data-i18n="overview.title">概览</h1>
+              </div>
+            </header>
+            <div class="page-body">
+
+            <!-- 风控告警横幅：有告警才出现，没有就整条收起。图只是提示，
+                 读屏器跳过；颜色全在 `.banner--warn` 里（warn 系三件套）。
+                 横幅里的几条告警去向不同（风控码去账号页，
+                 共用出口去代理页），所以每条告警各自是一条链接（`app-view-overview.js`
+                 的 `renderRisk` 拼进去）。 -->
+            <div class="banner banner--warn" data-role="risk-banner" hidden>
+              <svg class="banner__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+                <path d="M12 9v4" />
+                <path d="M12 17h.01" />
+              </svg>
+              <span class="banner__items" data-role="risk-text"></span>
+            </div>
+
+            <!-- 抢活动的一行汇总（claim 段在状态载荷里才有；claim 未接
+                 或没有可领账号时整行收起）。推荐落点是账号详情窗（claim 与账号
+                 一一对应），这里只是一行跳转指引（明细去账号详情）。
+                 行内「去账号页」链接改成整行可点的卡片链接——与八张
+                 指标卡的 `<a>` 同一套 `card--link` 交互（hover 亮边框、无下划
+                 线），行尾用精灵里的 arrow-right 表示跳转去向。 -->
+            <a class="card card--link overview-claim" href="/accounts" data-role="overview-claim-line" hidden>
+              <span data-role="overview-claim-text"></span>
+              <span class="overview-claim__jump" data-i18n="overview.claim.jump">去账号页</span>
+              <svg class="overview-claim__arrow" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <use href="#icon-arrow-right" />
+              </svg>
+            </a>
+
+            <!-- 八张指标卡（`--surface-strong` 色块）：前四张来自 state（账号与健康
+                 数来自 state.accounts，在飞与上限来自 state.metrics，全局，与顶栏
+                 同一个数）；后四张来自 getUsageStats 的「今天」范围，由
+                 app-view-overview.js 拉取（60s 节流，不进 /api/state 轮询）。
+
+                 每张卡是一个链接（`<a>`），整卡可点：数字本身不是终点，读者看到
+                 数字之后要办的事在下一页。前三个去账号页，并发上限去路由策略页
+                 的「队列」组——那个数就是 `maxTotalInflight`，改它的输入框在那里。
+                 四张今日卡都去统计视图的「今天」范围。
+                 `<a>` 天然进 Tab 顺序，不用另写键盘处理。
+
+                 错误数卡的两处落点：数字去日志页的请求事件 tab 且预置
+                 `status=error`（数字本身就是「失败的请求」，下一步是看它们）；
+                 下方多一行**今日阶段分布**小字（数据来自 `errors[]` 按
+                 阶段折叠），每个阶段各自链去 `stage=<stage>`。所以这一张卡不是
+                 单个 `<a>`——卡体是容器，数字与每个阶段各是一条链接。 -->
+            <div class="metrics">
+              <a class="card card--metric card--link" href="/accounts">
+                <div class="card__label" data-i18n="metric.accounts">账号</div>
+                <div class="card__value" data-role="metric-accounts">—</div>
+              </a>
+              <a class="card card--metric card--link" href="/accounts">
+                <div class="card__label" data-i18n="metric.healthy">健康账号</div>
+                <div class="card__value" data-role="metric-healthy">—</div>
+              </a>
+              <a class="card card--metric card--link" href="/accounts">
+                <div class="card__label" data-i18n="metric.inflight">在飞</div>
+                <div class="card__value" data-role="metric-inflight">—</div>
+              </a>
+              <a class="card card--metric card--link" href="/routing">
+                <div class="card__label" data-i18n="metric.limit">并发上限</div>
+                <div class="card__value" data-role="metric-limit">—</div>
+              </a>
+              <!-- 四张今日卡：数据是控制命令应答，不是 /api/state
+                   载荷，所以 data-role 前缀换成 usage-*，与上面四张区分来源。 -->
+              <a class="card card--metric card--link" href="/stats?range=today">
+                <div class="card__label" data-i18n="metric.todayRequests">今日请求</div>
+                <div class="card__value" data-role="usage-requests">—</div>
+              </a>
+              <a class="card card--metric card--link" href="/stats?range=today">
+                <div class="card__label" data-i18n="metric.todayTokens">今日 token</div>
+                <div class="card__value" data-role="usage-tokens">—</div>
+              </a>
+              <a class="card card--metric card--link" href="/stats?range=today">
+                <div class="card__label" data-i18n="metric.avgRate">平均速率</div>
+                <div class="card__value" data-role="usage-avg-rate">—</div>
+              </a>
+              <!-- 错误数卡：卡体的两组跳转目标不同，所以不是整卡一条链接。 -->
+              <div class="card card--metric card--errors">
+                <div class="card__label" data-i18n="metric.errors">错误数</div>
+                <a class="card__value card__value--link" data-role="usage-errors" href="/logs?tab=requests&status=error">—</a>
+                <div class="card__stages" data-role="usage-error-stages" hidden></div>
+              </div>
+            </div>
+
+            <!-- 今日 token 时序缩略：getUsageStats 的今日小时桶，入/出
+                 堆叠柱（app-charts.js 自绘 SVG，高度紧凑）。没有数据就不占地方：
+                 只留一行提示。整个图包在一个链接里：点击去
+                 统计视图的「今天」范围（图例与合计行也一起进去）。 -->
+            <section class="panel">
+              <div class="toolbar">
+                <h2 class="section-title" data-i18n="overview.usage.title">今日 token</h2>
+                <span class="toolbar__spacer"></span>
+                <span class="faint num" data-role="usage-total">—</span>
+                <!-- 裸的行内链接改成跳转按钮（按钮化，与统计页工具栏的「刷新」
+                     同一套 `.btn`），行尾带精灵里的 arrow-right 说明去向。 -->
+                <a class="btn btn--jump" href="/stats?range=today">
+                  <span data-i18n="overview.usage.open">查看统计</span>
+                  <svg class="btn__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <use href="#icon-arrow-right" />
+                  </svg>
+                </a>
+              </div>
+              <!-- 整图链接：图里除坐标轴刻度外没有文字（`<svg>` 对可访问树是
+                   `aria-hidden`），所以链接自己带可访问名——名字由视图按当天真实
+                   数据写（日期 + 合计），不是一句与内容无关的通用词。 -->
+              <a class="usage-link" href="/stats?range=today" data-role="usage-link">
+                <!-- 图框常驻（没有数据画基线 + 提示行），不整体隐藏。 -->
+                <div data-role="usage-chart"></div>
+                <p class="empty-inline" data-role="usage-empty" data-i18n="overview.usage.loading">加载中…</p>
+              </a>
+              <div class="row chart__legend" data-role="usage-legend" hidden>
+                <span class="legend__item"><span class="legend__swatch legend__swatch--in"></span><span data-i18n="stats.legend.in">输入</span></span>
+                <span class="legend__item"><span class="legend__swatch legend__swatch--out"></span><span data-i18n="stats.legend.out">输出</span></span>
+              </div>
+            </section>
+
+            <!-- 并发曲线（state.metrics.inflightHistory）。没有采样时图表与说明一起
+                 收起，只留一行提示（没有数据就不占地方）。
+                 「采样了但在飞一直是 0」是可点提示，整句链去请求日志——一条
+                 平线不是结论，下一步是看那段时间到底有没有请求（`app-view-overview.js`
+                 的 `renderChart` 按状态把这一行换成链接或纯文本）。 -->
+            <section class="panel">
+              <h2 class="section-title" data-i18n="overview.chart.title">并发曲线</h2>
+              <div class="chart" data-role="chart"></div>
+              <p class="empty-inline" data-role="chart-empty" hidden data-i18n="overview.chart.empty">还没有采样</p>
+              <div class="chart__meta" data-role="chart-meta" hidden>
+                <span data-role="chart-min">—</span>
+                <span data-role="chart-max">—</span>
+              </div>
+            </section>
+
+            <!-- 账号状态摘要（state.accounts[]）。一个账号都没有时不画空表格，
+                 只留一行指点去账号页添加。
+                 每一行整行可点，跳 `/accounts?focus=<label>`：那一页会把这一行滚进
+                 视野并高亮两秒。行是 `<tr>`，放不下 `<a>`，所以由视图挂 `data-href`
+                 与 `tabindex`（`app-view-overview.js` 的 bindControls）。 -->
+            <section class="panel">
+              <h2 class="section-title" data-i18n="overview.accounts.title">账号状态摘要</h2>
+              <table class="table table--tight" data-role="accounts-table">
+                <caption class="table__caption" data-i18n="overview.accounts.title">账号状态摘要</caption>
+                <thead>
+                  <tr>
+                    <th scope="col" data-i18n="table.account">账号</th>
+                    <th scope="col" data-i18n="table.kind">类型</th>
+                    <th scope="col" data-i18n="table.routes">路由</th>
+                    <th scope="col" data-i18n="table.health">健康</th>
+                    <th scope="col" data-i18n="table.inflight">在飞</th>
+                    <th scope="col" data-i18n="table.limit">并发上限</th>
+                  </tr>
+                </thead>
+                <tbody data-role="accounts-body"></tbody>
+              </table>
+              <p class="empty-inline" data-role="accounts-empty" hidden data-i18n="overview.accounts.empty">还没有账号，去账号页添加一个。</p>
+            </section>
+            </div>
+          </div>

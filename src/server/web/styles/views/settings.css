@@ -1,0 +1,790 @@
+/* ------------------------------------------------------------------------- */
+/* 设置分组（每组 3 到 5 个控件，中等密度）                                    */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Section：轻量配置分组的容器，`.group` 就是它的实现。
+ *
+ * 与 `.panel` 同构（边框 / 半径 / 内边距走密度档），但两处刻意不同：**无阴影**
+ * （分组卡片是平铺的表单容器，浮起只靠 1px 边界；阴影留给模态
+ * 这类真浮层），标题与正文的竖向节奏稍紧（每组的间距从 space-2 提到 space-3，
+ * 对齐参考图的行距）。设置页的每一组都是一份独立的表单。
+ */
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--density-pad, var(--space-5));
+  border: 1px solid var(--line);
+  border-radius: var(--density-radius, var(--radius-md));
+  background: var(--panel);
+  box-shadow: none;
+}
+
+/*
+ * 分组标题：可选图标 + 标题。图标是装饰（aria-hidden，见 page.html），颜色
+ * 弱一档，不与标题文字争重。
+ */
+.group__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-title);
+  font-weight: var(--weight-strong);
+}
+
+.group__icon {
+  color: var(--muted);
+}
+
+/* 组内控件区：分组体自己不排版——它总是与 `.field-grid` 同时出现（设置页五组、
+   账号页的「导入 / 导出」），两列网格、行距与对齐都由那条规则给。
+   这里只留「长内容不外溢」这一条。 */
+.group__body {
+  min-width: 0;
+}
+
+/*
+ * 设置页主区：连接 + 服务两列并排。
+ *
+ * 这两组是会被反复改的字段（默认 model / 会话 TTL / 端口 / 绑定地址），所以常驻
+ * 首屏、两列并排。账户、高级区、页脚不在这张网格里：它们是各自独立的一层
+ * （见 `views/settings.html` 的层结构注释）。
+ *
+ * 两列等宽 `minmax(0, 1fr)`，列距 20px（`--space-5`）；`minmax(0, …)` 的下界必须是
+ * 0，否则一行长路径会把整列撑到内容宽、把列距挤没。
+ *
+ * `align-items: stretch`：同一行的两组拉齐到行高，矮组剩下的空白留在组内底部
+ * （字段自己 `justify-content: flex-start`），卡片边框不会一高一低地锯开。
+ *
+ * `flex: 0 0 auto`：`.page-body` 是 flex 列，网格作为它的子项默认会被压缩——
+ * 矮视口下网格被压到视口高，行高不变、内容溢出到滚动区外（路由页踩过）。
+ * 这里钉成不压缩，高度不够就让 `.page-body` 自己滚。
+ */
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-5);
+  align-items: stretch;
+  flex: 0 0 auto;
+}
+
+/*
+ * 路由策略页的两列网格：骨架与 `.settings-grid` 相同（2 × minmax(0, 1fr)、
+ * `align-items: start`、≤1024px 单列），只是配对与间距按这一页的内容定。
+ *
+ * 不复用 `.settings-grid` 类名：那个类名钉的是「设置页的五组」，两页以后各自的
+ * 配对还会变（设置页五组、路由页两块跨列 + 四块配对），共享类名会把两页的排版
+ * 绑在一起。间距取 `--space-4`（16）而不是设置页的 20：这一页的父容器
+ * `.page-body` 的段落间距就是 16，行与行之间跟块与块之间同一拍。
+ *
+ * `flex: 0 0 auto` 是必须的：`.page-body` 是 flex 列（flow 页的滚动容器），
+ * flex 子项默认 `flex-shrink: 1`。七个块直接在 `.page-body` 里时，
+ * 内容一超声口就被压缩——矩阵面板被压成 42px，而它里面的表格有 506px 高，
+ * 于是整张表溢出到滚动区域外（滚到底也看不见）。网格子项本身不会被压缩，
+ * 但网格容器这个 flex 子项会，所以这一层自己钉成不压缩。
+ *
+ * 基础规则写在这里、断点写在下一条 `@media` 里：同优先级下后写的生效，反过来的
+ * 话两列会被重中的基础规则盖回去（1000px 窗口仍是两列）。
+ */
+.routing-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  align-items: start;
+  flex: 0 0 auto;
+}
+
+/* 横跨两列的两块：降级顺序（竖排优先级列表）与账号矩阵（宽表）。 */
+.routing-grid__span {
+  grid-column: 1 / -1;
+}
+
+/* 设置页主区在 ≤1023px 退成一列（与 `.routing-grid` 同一条断点：再窄就每列不足
+   半张面板）。基础规则写在断点之前：同优先级下后写的生效，反过来的话两列会被
+   重中的基础规则盖回去（1000px 窗口仍是两列）。 */
+@media (max-width: 1023px) {
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* 路由页同一条断点：两列在 1024px 以下每列已不足半张面板，提前折行。 */
+  .routing-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/*
+ * 页级只读信息：环境变量优先级 + 配置文件落点并成一行。
+ *
+ * 它们是同一件事的两头（「哪个优先」与「写到哪」），各自占一个 20px 的区块间距
+ * 在页面顶部就吃掉 40px。行内用两段 `.hint`，折行由 `flex-wrap` 自己处理。
+ */
+.settings-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+}
+
+/* 字段格里的控件行（`.row`：开关 / 链接 / 输入框 + 按钮）与单行控件同高：
+   开关只有 22px、链接只有 21px，行盒不给最小高度时，标签到控件的那段留白
+   比旁边的输入框少 7px——服务组四个字段的「标签 → 控件」距离因此一行一个样。
+   作用域钉在设置页：`.row` 是全项目共用的组件类。 */
+[data-view="settings"] .field-cell > .row {
+  min-height: var(--control-height);
+}
+
+/* 只读值（设置页里“展示但不给改”的项，例如页脚的版本号）：用等宽字与正文色，
+   和可编辑控件在视觉上区分开。
+   账户组的「用户名」不是这条规则的用户：它要跟旁边的密码框逐行对齐，所以写成
+   只读 `<input class="field">`（同高、同左缘、同框感），不走裸文本。 */
+.group__readonly {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-meta);
+  word-break: break-all;
+}
+
+/* ------------------------------------------------------------------------- */
+/* 功能开关组：四列                                                          */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * 功能开关组在自己的卡内排四列（基类 `.field-grid` 的两列在 `styles/components.css`）。
+ *
+ * 它的 8 个格里 5 个是行内小件（开关 + 标签同一行）：两列要四行，四列只要两行。
+ *
+ * 为何是 **4**：1600×1000 实测这一组的内部列数（整页内容 / 与一屏的差）：
+ *
+ *   2 列  486px  967 / 938px（中 / 英）  溢出 139 / 110
+ *   3 列  395px  875 / 864px            溢出  47 /  36
+ *   4 列  314px  794 / 783px            富余  34 /  45
+ *   5 列  356px  837 / 806px            溢出   9 / 富余 22
+ *
+ * 5 列反而变高（格子窄到 166px，两行说明各多折一行）；只有 4 列在两个语言下都
+ * 装得下，而 8 个格子在 4 列里正好两行、没有落单的尾巴。
+ * 那组数据量的是它还在主网格里的宽度；分层之后这一组整行占满高级区，可用宽度
+ * 只增不减，四列的余量因此是保守值。
+ *
+ * 断点取 1024：向下到 752px 宽的卡里每列还有 166px，「请求上下文记录」这类标签 +
+ * 开关仍然放得下；≤1023px 回两列。写在 `.field-grid` 基础规则之后、选择器多一层
+ * 属性，所以不会被它盖回去。
+ */
+@media (min-width: 1024px) {
+  .settings-advanced [data-group="subsystems"] > .field-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+/* 窄屏（≤720px）连同这条四列一起让位。`.field-grid` 的单列规则在 components.css
+   （排在本文片段之前），而这条四列选择器多一层属性、特异性更高，不在这里补一条
+   就会在窄屏上仍然四列（8 个格子被压成每格 ~80px）。 */
+@media (max-width: 720px) {
+  .settings-advanced [data-group="subsystems"] > .field-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/*
+ * 说明的两档：常驻一行，或收进 ⓘ。
+ *
+ * 设置页有二十来条说明，全量常驻时每一格从「标签 + 控件」的 61px 长到 100px 以上，
+ * 一屏看得见的字段少了一半。分档只按**后果**走，不按长短：
+ *
+ *   常驻（`.hint`）     改的那一刻就要看见后果的四条：绑定地址、需要 API key、
+ *                       身份归一、额度耗尽阈值。写在字段格里的 `<p class="hint">`。
+ *   收进 ⓘ（`.hint-details--icon`）其余全部：结构是「空 `<summary>` + 细节段」，
+ *                       收起时 `summary` 只画一枚 ⓘ（36×36 命中区），悬停有 `title`
+ *                       全文，点开 / 键盘 Enter 展开全文。展开后是同一段文字，
+ *                       不是另写一份摘要——不会出现摘要与全文对不上。
+ *
+ * 原文没有第二份：每条说明在 DOM 里只有这一份（`.hint-details__more`），`title`
+ * 由 `data-i18n-attr` 从同一个键写，措辞与事实只在一处。
+ *
+ * 为什么用 `<details>`：`<summary>` 天然可聚焦，键盘展开不靠 JS；开合状态不持久，
+ * 切视图回来是收起的。
+ */
+.hint-details {
+  min-width: 0;
+  max-width: 42ch;
+  color: var(--faint);
+  font-size: var(--text-micro);
+}
+
+/* 空的 `summary` 只有一枚图标：盒子的字高就是 13px 的一行，字段格不会被说明撑高。
+   命中区用一层不绘制的 `::before` 扩到 36×36
+   （桌面可点面积口径），字形与盒子尺寸不动。
+   命中区以字形盒的中心铺开时，实测向上溢出 8.25px，盖住上面控件的底边
+   （`elementFromPoint` 在控件底边读到的是 `summary`）。所以把 36×36 的顶边钉在
+   字形盒上方 3px（1px 边界 − `--space-1`）：实测命中区顶边比上面控件的底边
+   低 1px，下一行标签上方还剩 2.5px。三档视口下都不压控件、标签，
+   也不给字段格加一像素高度。
+   `list-style` / `-webkit-details-marker` 两条规则只作用于本页的说明图标；
+   `<summary>` 的三角形是 UA 样式，要在这里单独收掉。
+   窄屏（≤720px）抬到 44×44：覆盖写在这里（设置页片段排在 base.css 之后，
+   同特异性时最后一条胜），伪元素的几何也一起覆盖——base.css 末尾那条共享规则
+   给的是「以盒心为中心铺开」，而桌面这条把顶边钉在字形盒上方 3px，两者不能混用。 */
+.hint-details--icon > summary {
+  position: relative;
+  display: inline-block;
+  width: 1em;
+  cursor: pointer;
+  list-style: none;
+}
+
+.hint-details--icon > summary::-webkit-details-marker {
+  display: none;
+}
+
+.hint-details--icon > summary::before {
+  content: "";
+  position: absolute;
+  top: calc(1px - var(--space-1));
+  left: 50%;
+  width: var(--control-height);
+  height: var(--control-height);
+  transform: translateX(-50%);
+}
+
+/*
+ * 窄屏：ⓘ 的命中区到 44×44。伪元素改成以字形盒中心铺开（`top: 50%` 与
+ * `translate(-50%, -50%)`），与 base.css 里其它字形类控件同一几何。
+ *
+ * 桌面那条「顶边钉在字形盒上方 3px」是为了不压住上面的控件——窄屏字段格已经
+ * 收成一列、控件之间是 16px 的格间距，44×44 以盒心铺开时上下各多出 12.25px，
+ * 仍落在格间距里。
+ */
+@media (max-width: 720px) {
+  .hint-details--icon > summary::before {
+    top: 50%;
+    width: var(--layout-touch-min);
+    height: var(--layout-touch-min);
+    transform: translate(-50%, -50%);
+  }
+}
+
+/* 收起时 `ⓘ`（这里还有一句），展开后 `▾`（正在看）：两者都不带文字，行高不跳。 */
+.hint-details--icon > summary::after {
+  content: "ⓘ";
+}
+
+.hint-details--icon[open] > summary::after {
+  content: "▾";
+}
+
+.hint-details--icon > summary:hover {
+  color: var(--muted);
+}
+
+/* 细节段：展开后是完整的一段，允许折行。 */
+.hint-details__more {
+  margin: var(--space-1) 0 0;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+
+/* 一行截断的长只读值（dump 文件路径、客户端版本来源）：全值在 title 上 */
+.hint.hint--clip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------------- */
+/* 自动抢套餐：只读策略、开抢节奏与当前活动清单                                */
+/* ------------------------------------------------------------------------- */
+
+.claim-overview {
+  gap: var(--space-2);
+}
+
+/* 不可领的活动：按钮保持按钮外形，用底色与字形弱一档标出禁用态。 */
+.detail__plan-actions .btn:disabled {
+  background: var(--panel-alt);
+  border-color: var(--line);
+  color: var(--faint);
+}
+
+/* 账号详情窗的状态分组标题：左对齐，与活动行的名称同一条竖线。 */
+.detail__claim-group {
+  margin-top: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-micro);
+  font-weight: var(--weight-strong);
+}
+
+.claim-overview__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.claim-overview__cadence,
+.claim-overview__activities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.claim-overview__activities {
+  flex-direction: column;
+}
+
+.claim-overview__activity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.claim-overview__activity-head,
+.claim-overview__cadence-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.claim-overview__activity-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.claim-overview__activity-window,
+.claim-overview__cadence-item {
+  color: var(--muted);
+  font-size: var(--text-micro);
+}
+
+/* ------------------------------------------------------------------------- */
+/* 设置页的四层：主区 / 账户 / 高级 / 页脚                               */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * 层与层之间是 `.page-body` 的 16px 节奏；层内的字段格再按组走 20px。
+ * 四层各自的主轴：
+ *
+ *   主区  `.settings-grid`（连接 + 服务两列）
+ *   账户  `.group` 整宽（不与其它组并排，见 views/settings.html 的层结构注释）
+ *   高级  `.settings-advanced`，默认收起；展开后是两格 `.group`，列距 16px
+ *   页脚  `.settings-footer`，一行两组，组间靠 `margin-left: auto` 分开
+ *
+ * 展开态的标题行 → 第一张卡、两卡之间都取 16px，与四层的段落间隔同一拍。
+ * 8px（带框折叠区 `.collapse__body` 的留白）在这里收起时看不见，展开后只有半拍；
+ * 页脚自己的上下 8px `padding` 同样去掉，按钮组与折叠标题行一样高。
+ */
+
+/* 账户组是 `.page-body` 的 flex 子项：不钉住会被压低（同 `.settings-grid`）。
+   作用域限定在设置页——`.group` 在账号页也出现，那一页的分组排版不归这里管。 */
+[data-view="settings"] > .page-body > .group {
+  flex: 0 0 auto;
+}
+
+/*
+ * 高级区：折叠头 + 正文，不画自己的框。
+ *
+ * 里面两格 `.group` 已经是卡（1px 边界 + 密度档内边距），外面再套一层就是一个框
+ * 套两个框（AGENTS 的双层框禁令）。所以这一层只排自己的纵向流，标题行让出
+ * 卡片边框 + 密度档内边距这一档，箭头与组标题的图标落在同一条竖线上。
+ *
+ * 收起时标题行下方什么都没有；展开时正文与标题行之间留 16px——与 `.page-body`
+ * 的四层间距同一拍，而不是共用 `.collapse__body` 给带框折叠区留的 8px。
+ */
+.settings-advanced {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+}
+
+/* 标题行让出卡片边框 + 密度档内边距这一档：箭头与组标题的图标落在同一条竖线上，
+   展开后两格 `.group` 的边框与账户组的边框也齐平（容器自己没有内边距）。 */
+.settings-advanced > .collapse__head {
+  padding: 0 calc(var(--density-pad, var(--space-5)) + 1px);
+  min-height: var(--control-height);
+}
+
+/* 展开的两卡之间与四层之间同一拍；标题行到第一张卡也吃到这一档。 */
+.settings-advanced > .collapse__body {
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+}
+
+/* 箭头随开合转（与 `.collapse` 同一套朝向：展开朝下、收起朝右）。规则写在这里是因为
+   这一层没有 `.collapse` 类名——容器不画框，只借折叠区的标题行形态。 */
+.settings-advanced[data-collapse-open="false"] .collapse__chevron {
+  transform: rotate(-90deg);
+}
+
+/* 标题行铺满整宽（`.collapse__head` 本就是 `width: 100%`），悬停时标题让一档色，
+   提示这一行可点；摘要由 `.collapse__summary` 的 `margin-left: auto` 靠右。 */
+.settings-advanced > .collapse__head:hover .collapse__title {
+  color: var(--muted);
+}
+
+/* 页脚：系统操作。左边是版本 + 检查更新，右边是退出进程（`--end` 靠
+   `margin-left: auto` 钉右缘，同按钮组的动作组口径）。页脚不是卡，没有边框与底色；
+   水平内边距与卡片的「边框 + 密度档内边距」同值，按钮与字段的左缘因此对齐。
+
+   允许折行：窄视口下两组各自整体换行（组内 nowrap），不会把按钮从它的标签后面
+   拆开；换行后 `--end` 组仍贴右缘。
+
+   纵向留白压到 0：四层的间距由 `.page-body` 的 16px `gap` 统一给，
+   去掉之后页脚高度只由 36px 的按钮决定，与折叠标题行同一档。 */
+.settings-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  padding: 0 calc(var(--density-pad, var(--space-5)) + 1px);
+  flex: 0 0 auto;
+}
+
+.settings-footer__group {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.settings-footer__group--end {
+  margin-left: auto;
+}
+
+/*
+ * 版本只读值与两颗按钮排同一行时共用 `--control-height`（36px）和
+ * `--radius-sm`（6px）：版本号按 14px × `--leading` 的文字行高垂直居中，
+ * 不画边框、不铺底色。21px 的裸文字高度与圆角都不在按钮组那一档。
+ * 左右各留 8px 是按钮组内距。
+ */
+.settings-footer__value {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  height: var(--control-height);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 42ch;
+}
+
+/* 页脚的小标签：与字段标签同一档字色/字重，但不是 `<label>`（没有控件可指） */
+.settings-footer__label {
+  color: var(--muted);
+  font-size: var(--text-meta);
+}
+
+/* ------------------------------------------------------------------------- */
+/* CollapsibleSection：可折叠配置区                                      */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * 结构（视图层拼 HTML，本层只管形态；开合行为在 `app-widgets.js`）：
+ *
+ *   <section class="collapse" data-collapse="<id>" data-collapse-open="true">
+ *     <button type="button" class="collapse__head" data-collapse-toggle
+ *             aria-expanded="true" aria-controls="<id>-body">
+ *       <svg class="collapse__chevron">…#icon-chevron-down…</svg>
+ *       <h2 class="collapse__title">…</h2>
+ *       <span class="collapse__summary">…状态摘要，各视图自己填…</span>
+ *     </button>
+ *     <div class="collapse__body" id="<id>-body">…</div>
+ *   </section>
+ *
+ * 展开状态由 `App.widgets` 持有（模块级 Map + sessionStorage 兜底）：`/api/state`
+ * 每 5 秒轮询重渲染后，视图重建 DOM 后调 `App.widgets.apply()`，折叠状态不能
+ * 因为局部更新被重置——这是验收硬项，所以状态不落在 DOM 属性上（重渲染会丢），
+ * 而是落在模块级 Map 里，DOM 只是它的投影。
+ *
+ * 容器与 `.group`（Section）同款：白底、1px 边界、密度档半径与内边距、无阴影；
+ * 唯一的区别是标题行是一个占满整行的按钮，摘要文案靠 `margin-left: auto` 靠右。
+ */
+.collapse {
+  display: flex;
+  flex-direction: column;
+  padding: var(--density-pad, var(--space-5));
+  border: 1px solid var(--line);
+  border-radius: var(--density-radius, var(--radius-md));
+  background: var(--panel);
+  box-shadow: none;
+}
+
+/*
+ * 标题行是 flex 行：标题与摘要都要能收缩（`min-width: 0`）并各自截断，否则
+ * 英文摘要（五个字段拼一句，比中文长三到五成）在中等宽度下把标题挤成两行，
+ * 折叠头从 36px 那一档长成两行高。摘要给定宽上限并省略，全文仍在 `title` 上
+ * （各视图写摘要时一起挂）。`flex-shrink` 只压摘要，标题优先。
+ */
+.collapse__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--control-height);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.collapse__title {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-title);
+  font-weight: var(--weight-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collapse__summary {
+  flex: 0 1 auto;
+  max-width: 60%;
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: var(--text-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * 摘要只在收起时出现（路由页）：展开后数字就在字段里，标题行再复述一遍
+ * 「等待上限 30000 · 队列深度 64 · …」只是噪声，而且还占着标题行的右半边。
+ *
+ * 做成显式钩子类而不是 `.collapse__summary` 的全局规则：聊天的选择器折叠区
+ * （`.chat__settings`）展开时也必须显示当前组合摘要——那里的摘要不是复述，
+ * 而是“五个下拉拼出来的组合”本身。
+ */
+.collapse--summary-when-closed[data-collapse-open="true"] .collapse__summary {
+  display: none;
+}
+
+/* 箭头随展开状态转：展开朝下，收起朝右。过渡只落在 transform（动画清单：
+   仅 hover、展开与状态过渡）。 */
+.collapse__chevron {
+  color: var(--muted);
+  transition: transform var(--motion-fast) ease;
+}
+
+.collapse[data-collapse-open="false"] .collapse__chevron {
+  transform: rotate(-90deg);
+}
+
+.collapse__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin-top: var(--space-2);
+}
+
+/* ------------------------------------------------------------------------- */
+/* 二次确认模态（护栏走模态，不用原生 `confirm()`）                              */
+/* ------------------------------------------------------------------------- */
+
+/* 复用 `.modal` 的全部结构（`class="modal confirm"`），这里只把宽度收窄:
+   确认框只装一句话 + 两个按钮，撑到 560px 反而让危险操作显得“隆重”。 */
+.confirm {
+  width: min(var(--layout-confirm-width), 92vw);
+}
+
+.confirm__text {
+  color: var(--text);
+  font-size: var(--text-meta);
+}
+
+/* 护栏说明（“控制面将暴露到网络”这类后果提示）：warn 系，不与错误混用。 */
+.confirm__warn {
+  color: var(--warn);
+  font-size: var(--text-micro);
+}
+
+/* 危险操作的主按钮色：删除 / 覆盖密钥这类不可逆动作用 danger 系。 */
+.btn--confirm-danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: var(--on-accent);
+}
+
+.btn--confirm-danger:hover {
+  border-color: var(--danger-border);
+  background: var(--danger-border);
+}
+
+/* ------------------------------------------------------------------------- */
+/* 撤销条（Toast）：删除会话不弹确认，改成「先删 + 5 秒可撤销」          */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * 一个真浮层，但是最轻的那种（浮层分类里登记在案的第四类）：
+ *   - 不遮罩、不锁底层滚动、不抢焦点（底部居中，避开右下角的滚动条与输入区）
+ *   - 投影是 `hidden`（与其他浮层同一条规矩），全局 `[hidden]` 那条 `!important`
+ *     负责压过这里的 `display: flex`
+ *   - z-index 与弹窗同档（`--layer-modal`），文档序决定谁盖谁（toast 排在模态之后）
+ *
+ * 为什么不做成页面内的一行提示：撤销条要跟用户的滚动位置无关——它表达的
+ * 是「刚刚那一下可以反悔」，而用户可能已经在另一段消息里了。
+ */
+.toast {
+  position: fixed;
+  bottom: var(--space-5);
+  left: 50%;
+  z-index: var(--layer-modal);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  max-width: min(560px, calc(100vw - var(--space-6) * 2));
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  color: var(--text);
+  font-size: var(--text-meta);
+  box-shadow: var(--shadow-panel);
+  transform: translateX(-50%);
+}
+
+/* 文案一行截断：撤销条的宽度不随会话名变长（全名在会话列表里）。 */
+.toast__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 动作键是普通按钮（`.btn`），只有它需要不被文字挤压。 */
+.toast__action {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* 登录页（未登录时能做的只有一件事，所以整页只装一张 360px 的卡片）              */
+/* ------------------------------------------------------------------------- */
+
+/* 整页容器：水平垂直居中，`100dvh` 让手机浏览器地址栏收起时也跟着变。 */
+.login-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  /* 新一点的浏览器按动态视口算：地址栏展开 / 收起时卡片不会一半在屏幕外 */
+  min-height: 100dvh;
+  padding: var(--space-5);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: var(--leading);
+}
+
+/* 卡片：360px 定宽，内部竖向节奏由 gap 给 */
+.login-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  width: 100%;
+  max-width: var(--layout-login-width);
+  padding: var(--space-6);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-panel);
+}
+
+/* 品牌区：方块 + 名字，居中压在表单上方 */
+.login-card__brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* 品牌图形：40×40 的自绘 ZCode 图标（与顶栏品牌共用 .brand-mark__*）。
+   尺寸与卡片内边距（24px）同一量级，既看得见又不是一块色斑。 */
+.login-card__mark {
+  width: var(--layout-login-mark);
+  height: var(--layout-login-mark);
+}
+
+.login-card__name {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-title);
+  font-weight: var(--weight-strong);
+}
+
+/* 表单：字段之间 12px，输入框与按钮都是全宽 */
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/*
+ * 错误行：外层是常驻的 live region（`aria-live="polite"`），里面才是可隐藏的横幅。
+ * 区域本身不进流程（空着就没有高度），所以「从无到有」的那一次变化会被读出来。
+ */
+.login-form__error {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 一个字段：标签在上、控件在下（卡片只有 312px 内容宽，左右排不下） */
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.login-field__label {
+  color: var(--muted);
+  font-size: var(--text-meta);
+}
+
+/* 主按钮占满整行（登录是这一页唯一的主操作）。登录页专用，不是通用变体。 */
+.btn--block {
+  width: 100%;
+}
+
+/* 卡片底部的说明：比 `.hint` 大一档，居左（与输入框左边界对齐） */
+.login-card__hint {
+  margin: 0;
+  color: var(--faint);
+  font-size: var(--text-meta);
+  line-height: var(--leading);
+}
+
+/* 语言切换：放在卡片底部而不是顶栏（登录页没有顶栏），居右不打扰主视线 */
+.login-card__lang {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  color: var(--faint);
+  font-size: var(--text-meta);
+}

@@ -1,35 +1,80 @@
 /**
- * HTTP server bootstrap with routing and proxy API key auth.
+ * HTTP server bootstrap with routing and data-plane authentication.
  *
- * Replaces the original `Bun.serve` adapter with `node:http.createServer` so
- * the same code runs on Bun (dev mode, source TS) and on Node (Android bundle).
- * Bun supports `node:http` natively; Node has no `Bun.serve` equivalent.
+ * Built on `node:http.createServer` rather than `Bun.serve`: the routing table,
+ * the loopback re-check and the data-plane gate are all request callbacks, and
+ * `node:http` expresses them without a framework. Bun serves `node:http`
+ * natively, and a compiled binary carries the same code.
  *
  */
 import { createServer, type Server } from "node:http";
 import { Readable } from "node:stream";
-import { timingSafeEqual } from "node:crypto";
-import webuiHtml from "./webui.txt" with { type: "text" };
 import type { ProxyConfig } from "../config/types.js";
-import type { AuthManager } from "../auth/manager.js";
+import type { Broker } from "../accounts/broker.js";
+import type { AccountManager } from "../accounts/manager.js";
+import { hasCapableAccount } from "../accounts/capability.js";
+import { getDefaultApiKeyManager } from "../apikeys/manager.js";
+import type { ApiKeyManager } from "../apikeys/manager.js";
 import { handleChatCompletions, handleListModels } from "./routes-openai.js";
 import { handleMessages } from "./routes-anthropic.js";
 import { handleResponsesRoute } from "./routes-responses.js";
 import { handleAsyncMessagesRoute, handleAsyncChatRoute, handleAsyncHealthRoute } from "./routes-async.js";
 import { handleMcpRoute, type McpRouteOptions } from "./routes-mcp.js";
 import { handleQuota } from "./routes-quota.js";
-import { errorResponse } from "../proxy/handler.js";
+import { errorResponse } from "../proxy/http-io.js";
+import { classifyClientKind } from "../proxy/client-kind.js";
+import type { ProxyHandlerOptions } from "../proxy/handler.js";
+import { addStage, getDefaultRequestStore, nextReqId } from "../proxy/request-record.js";
+import type { RequestStore } from "../proxy/request-record.js";
 import type { ResponseStore } from "../responses/store.js";
+import { SESSION_COOKIE, readCookie, type SessionStore } from "../users/session.js";
+import type { PanelHandler } from "./panel.js";
 
 interface ServerOptions {
   config: ProxyConfig;
-  auth: AuthManager;
+  /**
+   * 唯一出线口：各 handler 按 `(account, route)` 解析凭据与路由。
+   */
+  broker: Broker;
+  /**
+   * 账号仓：只有 async 闸门需要它：那是一个"有没有账号能跑
+   * async"的账号能力问题，不是某一次请求的路由问题，所以问 broker 不合适
+   * （broker 回答的是"这次请求走谁"）。
+   */
+  accounts: AccountManager;
   /** Override fetch for testing. */
   fetchImpl?: typeof fetch;
   /** When true, enable per-request debug diagnostics in the proxy handler. */
   debug?: boolean;
   /** Responses-API state store. When absent, `/v1/responses` runs stateless (`previous_response_id` returns 404). */
   responseStore?: ResponseStore;
+  /**
+   * 控制面（网页面板）的请求处理器。
+   *
+   * 面板挂在这个监听上而不是自己开一个端口：Docker 里 `-p 8080:8080` 一个端口
+   * 就够，而独立端口要么拿不到（令牌只在容器内的 stdout 里），要么多开一个面。
+   * 处理器返回 `false` 表示「这条请求不是面板的」，交给下面的代理路由。
+   */
+  panel?: PanelHandler;
+  /**
+   * 控制面会话表。给了它，`/v1/*` 的鉴权就变成「API key 或会话 Cookie，任一通过」。
+   *
+   * 这条让面板里的聊天视图在登录之后不必再收一次 key：页面带着会话 Cookie
+   * 请求，服务端认这个 Cookie。语义上等于数据面接受控制面凭据，这是有意的
+   * 取舍：反过来让控制面在转发时自己补一把 key，就要多一个只在
+   * 面板里存在的代理端点。
+   */
+  sessions?: SessionStore;
+  /**
+   * 数据面 API key 仓。缺省用进程级单例：控制面命令（`/keys` 页）与
+   * 鉴权必须是**同一个实例**，否则页面读到的用量永远停在 0。测试注入自己的实例。
+   */
+  apiKeys?: ApiKeyManager;
+  /**
+   * 请求记录的持有者。缺省用进程级实例：两个入口（`bootstrap.ts` /
+   * CLI）与面板读的应该是同一个，否则面板看到的永远是新开的一份空仓库。
+   */
+  requests?: RequestStore;
 }
 
 /** Minimal server handle: what the caller needs to print URLs and shut down. */
@@ -44,66 +89,143 @@ export interface ProxyServer {
 
 /** Create a fetch-style handler that routes the request through the proxy. */
 export function createFetchHandler(opts: ServerOptions): (req: Request) => Promise<Response> {
-  const { config, auth } = opts;
-  const proxyOpts = { config, auth, fetchImpl: opts.fetchImpl, debug: opts.debug === true };
-  const responsesOpts = {
+  const { config, broker, accounts } = opts;
+  const apiKeys = opts.apiKeys ?? getDefaultApiKeyManager();
+  const requests = opts.requests ?? getDefaultRequestStore();
+  const baseProxyOpts: ProxyHandlerOptions = {
     config,
-    auth,
+    broker,
     fetchImpl: opts.fetchImpl,
     debug: opts.debug === true,
+    requests,
+  };
+  const responsesOpts = {
+    config,
+    broker,
+    fetchImpl: opts.fetchImpl,
+    debug: opts.debug === true,
+    // 请求记录：三条协议共用同一份 store。归因（apiKeyId）按
+    // 请求在路由点补，见下面各调用点。
+    requests,
     ...(opts.responseStore ? { responseStore: opts.responseStore } : {}),
   };
   const asyncOpts = {
     config,
-    auth,
+    broker,
     fetchImpl: opts.fetchImpl,
     debug: opts.debug === true,
+    requests,
   };
   const mcpOpts: McpRouteOptions = {
     config,
-    auth,
+    broker,
+    accounts,
     ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+  };
+
+  /** 会话 Cookie 是否有效（滑动续期在 `SessionStore.resolve` 里）。*/
+  const sessionAuthenticated = (req: Request): boolean => {
+    if (!opts.sessions) return false;
+    const token = readCookie(req.headers.get("cookie") ?? undefined, SESSION_COOKIE);
+    return opts.sessions.resolve(token) !== null;
+  };
+
+  /**
+   * 数据面鉴权。三条的优先级是有意的：
+   *
+   * 1. 先看控制面会话 Cookie：面板里的聊天视图登录之后
+   *    直接带 Cookie，不必让用户把 key 再贴一遍。
+   * 2. 再看 `Authorization: Bearer` / `x-api-key`；命中的那条记录就是用量归因对象。
+   * 3. 都没带凭据时：`auth.requireKey` 关着，或者 key 表还是空的，就放行。表空放行
+   *    是既有语义，也是「第一次启动还没建 key」时唯一可行的状态。
+   *
+   * 返回 `null` = 拒绝（401）。会话与放行没有 key 可归因，`apiKeyId` 为 `null`。
+   */
+  const authenticate = async (req: Request): Promise<DataPlaneAuth | null> => {
+    if (sessionAuthenticated(req)) return { apiKeyId: null };
+
+    const presented = presentedKey(req);
+    if (presented) {
+      const record = await apiKeys.authenticate(presented);
+      if (record) return { apiKeyId: record.id };
+      // 带了 key 但不认：只有「校验开着」时才拒。关掉校验的部署里，客户端手里
+      // 遗留的任意 key 不该从能用变成 401。
+    }
+    if (!config.auth.requireKey) return { apiKeyId: null };
+    if (presented) return null;
+    if (await apiKeys.isEmpty()) return { apiKeyId: null };
+    return null;
+  };
+
+  /**
+   * 不走 `proxyRequest` 的数据面路由（`/v1/models`、`/mcp`）：只记状态码。
+   *
+   * token 数拿不到（那条链路不解析上游 `usage`），但「哪个 key 在用、出了几次错」
+   * 仍然要有，否则只查模型或只调 MCP 的客户端会永远显示零请求。为了让记账方只
+   * 收一种东西，这两条路由也开一条记录：它是一次真实的数据面请求，只是不经过
+   * 上游翻译链路（所以 `format` 不参与判定，`model` 留占位）。
+   */
+  const countDataPlane = async (auth: DataPlaneAuth, resp: Response, path: string, clientReq: Request): Promise<Response> => {
+    if (auth.apiKeyId !== null) {
+      const record = requests.begin({ reqId: nextReqId(), format: "openai", apiKeyId: auth.apiKeyId });
+      // 这两条路由也归类客户端（只看请求头），报表按客户端维度才不漏。
+      record.clientKind = classifyClientKind(clientReq.headers);
+      record.status = resp.status;
+      record.endedAt = Date.now();
+      record.totalMs = record.endedAt - record.startedAt;
+      addStage(record, "route", { path });
+      // 记账失败不能把一次已经完成的请求变成错误：收尾的写盘由仓自己兜（见
+      // `apikeys/manager.ts::onRequestEnd`）。
+      await apiKeys.onRequestEnd(record);
+      requests.notify(record);
+      // 记录此刻已完整（无流式收尾），落盘在同一收尾点。
+      requests.finalize(record);
+    }
+    return resp;
   };
 
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const path = url.pathname;
     const method = req.method;
-    const cors = corsHeaders(Boolean(config.auth.proxyApiKey));
+    // CORS 只在数据面真的要求凭据时才发（理由见 `corsHeaders`）。
+    // 表是否为空要读存储（异步），所以这一条也变成 await。
+    const cors = corsHeaders(await dataPlaneGated(config, apiKeys));
 
     // CORS preflight
     if (method === "OPTIONS") {
       return corsResponse(cors);
     }
 
-    if (method === "GET" && (path === "/webui" || path.startsWith("/webui/"))) {
-      return new Response(webuiHtml, {
-        status: 200,
-        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" },
-      });
-    }
+    // （`/chat` 没有独立页路由：聊天收进面板后那条路径落到下面的数据面鉴权
+    // 闸门 —— 打过去就是 401 或 404，不再是一页 HTML。）
 
-    if (config.auth.proxyApiKey) {
-      const authHeader = req.headers.get("authorization") ?? req.headers.get("x-api-key");
-      if (!authHeader || !checkProxyKey(authHeader, config.auth.proxyApiKey)) {
-        return errorResponse(401, "authentication_error", "Invalid or missing proxy API key");
-      }
+    const auth = await authenticate(req);
+    if (!auth) {
+      return errorResponse(401, "authentication_error", "Invalid or missing data-plane API key", undefined, "auth-invalid");
     }
+    /** 归因信息：key 请求带 `apiKeyId`，会话 / 放行不带（没有 key 可记账）。*/
+    const proxyOpts: ProxyHandlerOptions = {
+      ...baseProxyOpts,
+      observer: apiKeys,
+      ...(auth.apiKeyId === null ? {} : { apiKeyId: auth.apiKeyId }),
+    };
 
     // --- Routing ---
 
     if (path === "/v1/chat/completions" && method === "POST") {
       return handleChatCompletions(req, proxyOpts);
     }
-    if (config.responses.enabled && path === "/v1/responses" && method === "POST") {
-      return handleResponsesRoute(req, responsesOpts);
+    if (path === "/v1/responses" && method === "POST") {
+      // 归因与 proxyOpts 同款：key 请求带 apiKeyId，会话 / 放行不带。
+      return handleResponsesRoute(req, { ...responsesOpts, ...(auth.apiKeyId === null ? {} : { apiKeyId: auth.apiKeyId }) });
     }
     if (path === "/v1/models" && method === "GET") {
-      return handleListModels(req);
+      return await countDataPlane(auth, handleListModels(req, config), `${method} ${path}`, req);
     }
 
     if (path === "/quota" && method === "GET") {
-      return handleQuota(config, opts.fetchImpl);
+      return handleQuota(config, broker, accounts, opts.fetchImpl);
     }
 
     if (path === "/v1/messages" && method === "POST") {
@@ -111,24 +233,31 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
     }
 
     if (config.async.enabled) {
-      // Off-peak is a coding-plan feature: on start-plan the async routes are
-      // disabled even when async.enabled=true (explicit error, not a silent 404).
+      // Off-peak needs a credential that carries both halves (plan JWT for the
+      // ticket queue + coding-plan API key for the upstream call,
+      // auth/capabilities.ts). There is no process-global plan setting, so the
+      // gate asks the account registry whether *any* enabled account can serve
+      // async. Still an explicit 400 rather than a silent 404: the
+      // operator turned the routes on, so "no account can run them" is worth
+      // naming.
       const isAsyncRoute =
         (path === "/async/v1/messages" && method === "POST") ||
         (path === "/async/v1/chat/completions" && method === "POST") ||
         (path === "/async/v1/health" && method === "GET");
-      if (isAsyncRoute && config.plan !== "coding-plan") {
+      if (isAsyncRoute && !(await hasCapableAccount(accounts, "async"))) {
         return errorResponse(
           400,
           "async_plan_unsupported",
-          `async (off-peak) endpoints are only available with plan "coding-plan" (current plan: ${config.plan})`,
+          "async (off-peak) endpoints need an account holding both the plan JWT and the coding-plan API key; no enabled account has both",
+          undefined,
+          "auth-invalid",
         );
       }
       if (path === "/async/v1/messages" && method === "POST") {
-        return handleAsyncMessagesRoute(req, asyncOpts);
+        return handleAsyncMessagesRoute(req, { ...asyncOpts, ...(auth.apiKeyId === null ? {} : { apiKeyId: auth.apiKeyId }) });
       }
       if (path === "/async/v1/chat/completions" && method === "POST") {
-        return handleAsyncChatRoute(req, asyncOpts);
+        return handleAsyncChatRoute(req, { ...asyncOpts, ...(auth.apiKeyId === null ? {} : { apiKeyId: auth.apiKeyId }) });
       }
       if (path === "/async/v1/health" && method === "GET") {
         return handleAsyncHealthRoute(req, asyncOpts);
@@ -140,18 +269,21 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
       // plugin's tools (streamable HTTP — POST JSON-RPC, GET listing,
       // DELETE session close). Replaces the per-plugin `/mcp/{key}` relay.
       if (path === "/mcp" && (method === "POST" || method === "GET" || method === "DELETE")) {
-        return handleMcpRoute(req, mcpOpts);
+        return await countDataPlane(auth, await handleMcpRoute(req, mcpOpts), `${method} ${path}`, req);
       }
     }
 
     if (path === "/health" || path === "/") {
-      return new Response(JSON.stringify({ status: "ok", provider: config.provider }), {
+      // 这里只回存活状态与账号数：provider 是凭据的属性（不是进程级配置），
+      // 没有进程级答案可回，那个字段整体不存在（不留"为兼容而存在"的字段）；
+      // 账号数才是运维真正能用的信号（0 = 还没登录）。
+      return new Response(JSON.stringify({ status: "ok", accounts: (await accounts.list()).length }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
     }
 
-    return errorResponse(404, "not_found_error", `No route for ${method} ${path}`);
+    return errorResponse(404, "not_found_error", `No route for ${method} ${path}`, undefined, "other");
   };
 }
 
@@ -166,9 +298,28 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
 export function startServer(opts: ServerOptions): Promise<ProxyServer> {
   const handler = createFetchHandler(opts);
   const { port: requestedPort, host } = opts.config.server;
-  const cors = corsHeaders(Boolean(opts.config.auth.proxyApiKey));
+  const apiKeys = opts.apiKeys ?? getDefaultApiKeyManager();
 
   const server: Server = createServer(async (req, res) => {
+    /*
+     * 面板先看：它认领 `/`、页面路径、`/login` 与 `/api/*`，其余返回
+     * `false` 交回代理。放在超时与 abort 处理之前，是因为面板自己管响应，不参与
+     * 代理那条「客户端断开就 abort 上游」的链路。
+     */
+    if (opts.panel) {
+      try {
+        if (await opts.panel(req, res)) return;
+      } catch (err) {
+        if (!res.headersSent) {
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: { type: "internal_error", message: (err as Error).message } }));
+        } else {
+          try { res.end(); } catch { /* socket already gone */ }
+        }
+        return;
+      }
+    }
+
     const abortController = new AbortController();
     const onClientClose = (): void => {
       if (!res.writableEnded) abortController.abort();
@@ -186,6 +337,9 @@ export function startServer(opts: ServerOptions): Promise<ProxyServer> {
     }
 
     try {
+      // CORS 头要按「数据面是否要求凭据」现算（表可能刚被建了第一把 key）。仓自己
+      // 缓存内存表，所以这里只有第一次会真的读文件。
+      const cors = corsHeaders(await dataPlaneGated(opts.config, apiKeys));
       const webReq = nodeReqToWebRequest(req, abortController.signal);
       const resp = await handler(webReq).then((r) => addCorsHeaders(r, cors));
       await writeWebResponseToNodeResp(resp, res, abortController.signal);
@@ -195,7 +349,9 @@ export function startServer(opts: ServerOptions): Promise<ProxyServer> {
         res.writeHead(500, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { type: "internal_error", message: (err as Error).message } }));
       } else {
-        try { res.end(); } catch {}
+        // 响应头已经发出去（流式或已写半份 body）：这里只能尽力收尾，失败意味着
+        // 客户端已经断开，没有任何可补救的动作。
+        try { res.end(); } catch { /* socket already gone */ }
       }
     }
   });
@@ -244,7 +400,9 @@ function nodeReqToWebRequest(req: import("node:http").IncomingMessage, signal?: 
     return new Request(url, { method, headers, signal });
   }
 
-  // Cast: Node's ReadableStream type ≠ Web ReadableStream type at the type layer, but `Readable.toWeb` returns a spec-compliant stream at runtime.
+  // SAFETY: Node's ReadableStream type and the Web one are structurally different at
+  // the type layer, but `Readable.toWeb` returns a spec-compliant Web stream at
+  // runtime; `fetch` only ever calls `getReader()` on it, which both provide.
   const bodyStream = Readable.toWeb(req) as unknown as ReadableStream<Uint8Array>;
   const init: RequestInit & { duplex?: "half" } = {
     method,
@@ -291,9 +449,11 @@ async function writeWebResponseToNodeResp(resp: Response, res: import("node:http
     res.end();
   } catch (err) {
     if (abortSignal?.aborted) {
-      try { res.end(); } catch {}
+      // 客户端 abort：上游流已无意义，尽力结束响应；socket 已断时 `end` 会抛。
+      try { res.end(); } catch { /* socket already gone */ }
     } else {
-      try { res.destroy(err as Error); } catch {}
+      // 上游/转换失败：把错误推给 Node 的 socket 让它销毁连接；已断开时同样会抛。
+      try { res.destroy(err as Error); } catch { /* socket already gone */ }
     }
   } finally {
     abortSignal?.removeEventListener("abort", onAbort);
@@ -301,18 +461,38 @@ async function writeWebResponseToNodeResp(resp: Response, res: import("node:http
 }
 
 /**
- * Check whether the client provided the correct proxy API key.
- * Constant-time comparison (audit R2-10): a plain `===` on the presented vs
- * expected key is a timing side channel on public-network deployments
- * (default bind is 0.0.0.0). Behavior is unchanged for honest callers.
+ * 数据面鉴权结果。
+ *
+ * `apiKeyId` 为 `null` 表示这次请求没有 key 可归因：控制面会话（在面板 `/panel`
+ * 登录过的浏览器）或「表空 / 关掉校验」的放行。用量只记在具体的 key 上，所以这两种情况
+ * 不计入任何一把 key 的统计。
  */
-function checkProxyKey(authHeader: string, expected: string): boolean {
-  const trimmed = authHeader.trim();
-  const presented = trimmed.startsWith("Bearer ") ? trimmed.slice(7).trim() : trimmed;
-  const a = Buffer.from(presented, "utf-8");
-  const b = Buffer.from(expected, "utf-8");
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
+interface DataPlaneAuth {
+  apiKeyId: string | null;
+}
+
+/**
+ * 客户端出示的凭据：`Authorization: Bearer <key>` 或 `x-api-key: <key>`。
+ *
+ * 两个头都接受是因为各家 SDK 习惯不同（OpenAI 系用前者，Anthropic 系用后者）。
+ * 比较本身在 `apikeys/manager.ts::authenticate` 里做，走 hash 的 `timingSafeEqual`：
+ * 明文字符串相等会留下一条把 key 逐字节试出来的时序旁路（audit R2-10）。
+ */
+function presentedKey(req: Request): string | undefined {
+  const header = req.headers.get("authorization") ?? req.headers.get("x-api-key");
+  if (!header) return undefined;
+  const trimmed = header.trim();
+  if (!trimmed) return undefined;
+  return trimmed.startsWith("Bearer ") ? trimmed.slice(7).trim() : trimmed;
+}
+
+/**
+ * 数据面是否真的要求凭据（CORS 与启动日志共用这一条判定）。
+ *
+ * `auth.requireKey` 关掉、或者 key 表还是空的时候鉴权是敞开的。
+ */
+async function dataPlaneGated(config: ProxyConfig, apiKeys: ApiKeyManager): Promise<boolean> {
+  return config.auth.requireKey && !(await apiKeys.isEmpty());
 }
 
 /** Build a CORS preflight response. */
@@ -338,14 +518,16 @@ function addCorsHeaders(resp: Response, cors: Record<string, string>): Response 
 }
 
 /**
- * CORS headers are emitted ONLY when `auth.proxyApiKey` is set.
+ * CORS headers are emitted ONLY when the data plane actually requires credentials
+ * (`auth.requireKey` on and at least one key created).
  *
  * Rationale: the /mcp relay (and /v1/*) inject the operator's real OAuth
- * credentials upstream; with `access-control-allow-origin: *` on a keyless
+ * credentials upstream; with `access-control-allow-origin: *` on an open
  * deployment, any webpage in a logged-in user's browser could pass preflight
  * and drive those routes cross-origin (MCP JSON POSTs are preflighted, so
  * withholding the headers blocks the browser before the request fires).
- * Local CLI/curl tools and the same-origin /webui never needed CORS.
+ * Local CLI/curl tools and the panel's own same-origin views (under `/panel`)
+ * never needed CORS.
  */
 function corsHeaders(corsEnabled: boolean): Record<string, string> {
   if (!corsEnabled) return {};

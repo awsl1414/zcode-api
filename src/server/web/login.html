@@ -1,0 +1,118 @@
+<!doctype html>
+<!--
+  login.html — 登录页骨架。
+
+  控制面唯一不需要会话的页面。它和面板共用同一套三层结构（`page.ts` 的拼装函数），
+  所以配色、字号、按钮形状不会和登录之后的页面漂移。
+
+    THEME-BOOT    首屏防闪烁内联脚本，必须留在 head 最前面
+    TOKENS        tokens.css（只放 :root 变量）
+    COMPONENTS    components.css（只放组件类）
+    I18N          zh.json / en.json 两套字典
+    LOGIN         运行时脚本（`login.js`）
+
+  这里没有导航、没有侧边栏：未登录时能做的只有一件事，所以整页只有一张 360px 的
+  卡片，水平垂直居中。把卡片拉满整行、内容贴顶时，1600px 的窗口里
+  有效内容只占左侧 300px。
+
+  语言切换从顶栏搬到卡片底部：登录页没有导航，顶栏只剩一个语言下拉时会和居中的卡片
+  抢注意力（居中与贴顶两个选项里选后者）。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title data-i18n="login.title">登录 ZCode 控制台</title>
+    <script>
+      <!-- THEME-BOOT -->
+    </script>
+    <style>
+      <!-- TOKENS -->
+    </style>
+    <style>
+      <!-- COMPONENTS -->
+    </style>
+  </head>
+  <body>
+    <main class="login-page">
+      <section class="login-card" aria-label="登录" data-i18n-attr="aria-label:login.heading">
+        <!-- 品牌区：自绘 ZCode 图标 + 名字，居中压在表单上方。图形与顶栏品牌
+             同一套（.brand-mark__*）：圆角方块上的几何 Z，色走 token，
+             明暗两套自动适配。方块是纯装饰，所以 `aria-hidden`。 -->
+        <div class="login-card__brand">
+          <svg class="login-card__mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <rect class="brand-mark__tile" x="1" y="1" width="22" height="22" rx="6" />
+            <path class="brand-mark__glyph" d="M7.5 8h9l-9 8h9" />
+          </svg>
+          <h1 class="login-card__name" data-i18n="login.brand">ZCode 控制台</h1>
+        </div>
+
+        <form class="login-form" data-role="login-form">
+          <!--
+            错误行：外层常驻（`aria-live="polite"`），失败时只把里面的横幅放出来。
+            `hidden` 挂在横幅上而不是外层，否则 live region 自己也从无障碍树里消失，
+            读屏软件就不会念这一句了。
+          -->
+          <div class="login-form__error" data-role="login-error" aria-live="polite">
+            <div class="banner banner--danger" data-role="login-error-banner" hidden>
+              <span data-role="login-error-text"></span>
+            </div>
+          </div>
+
+          <!-- 用户名预填 admin：控制面只有管理员一个身份，绝大多数
+               登录用的就是这个名。预填之后焦点直接落在密码框，回车即可提交；
+               用户改了用户名也不会被拦——浏览器 autofill / 用户手填都会盖掉这个默认值，
+               这里只是「默认值」，不是禁写。密码永远不预填。 -->
+          <div class="login-field">
+            <label class="login-field__label" for="login-username" data-i18n="login.username">用户名</label>
+            <input
+              class="field"
+              id="login-username"
+              type="text"
+              value="admin"
+              autocomplete="username"
+              autocapitalize="off"
+              spellcheck="false"
+              data-role="login-username"
+            />
+          </div>
+
+          <div class="login-field">
+            <label class="login-field__label" for="login-password" data-i18n="login.password">密码</label>
+            <input
+              class="field"
+              id="login-password"
+              type="password"
+              autocomplete="current-password"
+              data-role="login-password"
+            />
+          </div>
+
+          <button type="submit" class="btn btn--primary btn--block" data-role="login-submit" data-i18n="login.submit">
+            登录
+          </button>
+        </form>
+
+        <p class="login-card__hint" data-i18n="login.hint">
+          首次启动时管理员密码打印在运行 zcode-proxy 的终端里，登录后可在设置页修改。
+        </p>
+
+        <div class="login-card__lang">
+          <label class="login-field__label" for="prefs-lang" data-i18n="prefs.language">语言</label>
+          <select class="select" id="prefs-lang">
+            <option value="zh">中文</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+      </section>
+    </main>
+
+    <script type="application/json" id="i18n-dicts">
+      /* I18N */
+    </script>
+    <script>
+      /* LOGIN */
+    </script>
+  </body>
+</html>

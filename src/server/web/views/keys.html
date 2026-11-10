@@ -1,0 +1,57 @@
+          <!-- ⑥ API key 页：数据面凭据，一把 key 一个程序。
+               与「账号」分开：账号是上游凭据（我们花谁的额度），API key 是下游凭据
+               （谁在调用我们）。合并成一页会让两件事的「删除」看起来是同一个动作。 -->
+          <div class="page dense" data-view="keys" hidden>
+            <!-- 标题与页面级主操作合成 PageHeader（骨架规范的正例）。
+                 「裸 h1 + 只装一个按钮的 toolbar」的写法里，工具栏本来是为过滤器
+                 行准备的，这里没有过滤器，多出来那一行只负责把按钮推到右边。 -->
+            <header class="page-header">
+              <div class="page-header__heading">
+                <h1 class="page-title" data-i18n="nav.keys">API key</h1>
+              </div>
+              <div class="page-header__actions">
+                <button type="button" class="btn btn--primary" data-action="keys-create" data-i18n="keys.create">创建 key</button>
+              </div>
+            </header>
+            <div class="page-body">
+
+            <div class="banner banner--danger" data-role="keys-error" role="alert" hidden>
+              <span data-role="keys-error-text"></span>
+              <span class="toolbar__spacer"></span>
+              <button type="button" class="btn" data-action="keys-dismiss-error" data-i18n="common.close">关闭</button>
+            </div>
+
+            <div class="banner banner--ok" data-role="keys-notice" role="status" hidden>
+              <span data-role="keys-notice-text"></span>
+            </div>
+
+            <section class="panel">
+                  <table class="table" data-role="keys-table">
+                    <caption class="table__caption" data-i18n="nav.keys">API key</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col" data-i18n="keys.table.name">名称</th>
+                        <!-- 前缀列升级为 Key 列（掩码 + 显示 / 复制），其余列序不变。 -->
+                        <th scope="col" data-i18n="keys.table.key">Key</th>
+                        <th scope="col" data-i18n="keys.table.today">今日</th>
+                        <th scope="col" data-i18n="keys.table.total">累计</th>
+                        <th scope="col" data-i18n="keys.table.lastUsed">最后使用</th>
+                        <!-- 「状态」列并入操作列的状态徽章（它现在既是
+                             显示也是切换），一行里没有两处说同一件事；省下的宽度
+                             给了「累计」。 -->
+                        <th scope="col" class="col-actions" data-i18n="keys.table.actions">操作</th>
+                      </tr>
+                    </thead>
+                <tbody data-role="keys-body"></tbody>
+              </table>
+
+              <div class="empty" data-role="keys-empty" hidden>
+                <div class="empty__title" data-i18n="keys.empty.title">还没有 API key</div>
+                <div class="empty__hint" data-i18n="keys.empty.hint">建一把 key 给一个程序用：笔记本上的 Claude Code、服务器的 CI，各建一把，用出问题只吊销那一把。</div>
+                <div class="empty__actions">
+                  <button type="button" class="btn" data-action="keys-create" data-i18n="keys.create">创建 key</button>
+                </div>
+              </div>
+            </section>
+            </div>
+          </div>

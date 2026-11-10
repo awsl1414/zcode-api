@@ -1,0 +1,612 @@
+        </main>
+      </div>
+
+      <!-- 移动端底部 tab：三格直达 + 「更多」。
+           ≤720px 时侧边栏整体退场，底部这条是唯一的导航。前三格各指一个路径；
+           另外五个视图（统计 / 聊天 / API key / 设置 / 日志）收在「更多」里——
+           它是一颗真按钮 + 一段可开合的面板，不是不可点的占位。
+           面板与抽屉同一类浮层：`data-dialog="tabbar-more"`，开合 / Esc /
+           焦点归还都由 `App.widgets.dialog` 管，点了外面能关。 -->
+      <nav class="tabbar">
+        <a class="tabbar__item" href="/" data-nav="overview" data-i18n="nav.overview">概览</a>
+        <a class="tabbar__item" href="/accounts" data-nav="accounts" data-i18n="nav.accounts">账号</a>
+        <a class="tabbar__item" href="/routing" data-nav="routing" data-i18n="nav.routing">路由策略</a>
+        <button
+          type="button"
+          class="tabbar__item tabbar__item--more"
+          data-role="tabbar-more"
+          aria-expanded="false"
+          aria-controls="tabbar-more-panel"
+          data-i18n="nav.more"
+        >
+          更多
+        </button>
+      </nav>
+
+      <div class="tabbar-more-scrim modal-scrim" data-dialog-scrim="tabbar-more" data-dialog-close="tabbar-more" hidden></div>
+      <div class="tabbar-more panel" id="tabbar-more-panel" data-dialog="tabbar-more" role="dialog" aria-modal="true" aria-labelledby="tabbar-more-title" hidden>
+        <span class="tabbar-more__title" id="tabbar-more-title" data-i18n="nav.more">更多</span>
+        <a class="nav" href="/stats" data-nav="stats" data-tabbar-more="1">
+          <svg class="nav__icon" aria-hidden="true" focusable="false"><use href="#icon-chart-column" /></svg>
+          <span data-i18n="nav.stats">统计</span>
+        </a>
+        <button type="button" class="nav" data-nav="chat" data-action="show-chat" data-tabbar-more="1">
+          <svg class="nav__icon" aria-hidden="true" focusable="false"><use href="#icon-message-square" /></svg>
+          <span data-i18n="nav.chat">聊天</span>
+        </button>
+        <a class="nav" href="/keys" data-nav="keys" data-tabbar-more="1">
+          <svg class="nav__icon" aria-hidden="true" focusable="false"><use href="#icon-key-round" /></svg>
+          <span data-i18n="nav.keys">API key</span>
+        </a>
+        <a class="nav" href="/settings" data-nav="settings" data-tabbar-more="1">
+          <svg class="nav__icon" aria-hidden="true" focusable="false"><use href="#icon-settings" /></svg>
+          <span data-i18n="nav.settings">设置</span>
+        </a>
+        <a class="nav" href="/logs" data-nav="logs" data-tabbar-more="1">
+          <svg class="nav__icon" aria-hidden="true" focusable="false"><use href="#icon-scroll-text" /></svg>
+          <span data-i18n="nav.logs">日志</span>
+        </a>
+      </div>
+    </div>
+
+    <!-- 添加账号（三个 tab）：登录 / 导入凭据 / 粘贴 JWT。**登录排首位且
+         默认选中**：需要「加一个账号」时，绝大多数人手上没有凭据文件、也说不清
+         JWT 是什么，扫码登录是唯一「不用先知道什么」的路。tab 切换只改可见面板。
+         导入凭据内部再选来源（浏览器选文件 / 服务端路径）：两者是平级 tab 时
+         容易混，而「本机文件」里的「本机」指的是服务端那台机器，改名并合并。
+         开合走 `App.widgets.dialog`（`data-dialog="add"`）：Esc / 遮罩 / 焦点陷阱与
+         焦点归还与其它模态同一套；取消时登录轮询也要停（视图给 `onDismiss`）。 -->
+    <div class="modal-scrim" data-role="add-modal-scrim" data-dialog-scrim="add" data-dialog-close="add" hidden></div>
+    <div
+      class="modal modal--md"
+      data-role="add-modal"
+      data-dialog="add"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="add-modal-title"
+      hidden
+    >
+      <div class="modal__head">
+        <span class="modal__title" id="add-modal-title" data-i18n="accounts.add">添加账号</span>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button type="button" class="tab tab--active" role="tab" aria-selected="true" data-add-tab="login" data-i18n="accounts.add.tab.login">登录</button>
+        <button type="button" class="tab" role="tab" aria-selected="false" data-add-tab="credential" data-i18n="accounts.add.tab.credential">导入凭据</button>
+        <button type="button" class="tab" role="tab" aria-selected="false" data-add-tab="jwt" data-i18n="accounts.add.tab.jwt">粘贴 JWT</button>
+      </div>
+
+      <!--
+        三个面板的表单骨架与全项目同一套：`.field-grid` > `.field-cell`，
+        标签在上、控件吃满格、说明在控件下方。弹窗宽 600px，单列（`.modal .field-grid`
+        把两列收成一列），所以不需要定宽标签列——那套 `--layout-modal-label` 的
+        100px 列是旧骨架的补丁，已随骨架删除。
+      -->
+      <div class="modal__body">
+        <div class="banner banner--danger" data-role="add-error" role="alert" hidden>
+          <span data-role="add-error-text"></span>
+        </div>
+
+        <!-- tab 1：登录：选 provider → startOAuth → 二维码 + 授权链接 + 轮询
+             面板自己的状态行是运行时拼的，所以不带 data-i18n（否则切换语言时会被
+             静态原文覆盖），由 `app-add-account.js` 的 renderStatus 重画。 -->
+        <div data-add-panel="login" class="field-grid">
+          <div class="field-cell">
+            <span class="field-cell__label" id="add-login-provider-label" data-i18n="accounts.add.login.provider">服务商</span>
+            <div
+              class="login-flow__providers"
+              role="group"
+              data-role="login-providers"
+              aria-labelledby="add-login-provider-label"
+            >
+              <button
+                type="button"
+                class="login-flow__provider login-flow__provider--active"
+                data-login-provider="zai"
+                aria-pressed="true"
+                data-i18n="accounts.add.login.provider.zai"
+              >
+                zai（国际）
+              </button>
+              <button
+                type="button"
+                class="login-flow__provider"
+                data-login-provider="bigmodel"
+                aria-pressed="false"
+                data-i18n="accounts.add.login.provider.bigmodel"
+              >
+                bigmodel（国内）
+              </button>
+            </div>
+            <div class="hint" data-i18n="accounts.add.login.qrHint">用手机扫码完成授权。手机与代理不在同一网络也能成功，但之后在使用环境的同一网络下发起请求更稳妥。</div>
+          </div>
+
+          <!-- 白底黑码：扫码器需要黑白对比，深色主题下也不跟主题走。
+               容器初始 `hidden`，只有真画出了 SVG 才摘掉（空框根因见
+               `app-add-account.js` 的 renderLoginQr）。 -->
+          <div class="login-flow__qr" data-role="login-qr" hidden></div>
+          <!-- 授权链接不渲染原文：那串 query 占六行、没人会去读它。这里只回答
+               「另一条路是什么」，两个动作都在别处完成授权——本机浏览器打开，
+               或复制到任意浏览器。 -->
+          <div class="login-flow__link-row" data-role="login-link-row" hidden>
+            <p class="hint" data-i18n="accounts.add.login.linkHint">扫码之外的另一条路：复制链接，在任意浏览器里打开即可完成授权。</p>
+            <div class="login-flow__actions">
+              <button type="button" class="btn" data-action="login-copy" data-i18n="accounts.add.login.copyLink">复制链接</button>
+              <button type="button" class="btn btn--primary" data-action="login-open" data-role="login-open" hidden data-i18n="accounts.add.login.openBrowser">打开浏览器</button>
+            </div>
+            <div class="hint" data-role="login-copy-hint" hidden></div>
+          </div>
+
+          <div class="login-flow__status" data-role="login-status">选择服务商开始登录。</div>
+
+          <!-- 按钮区收拢：重试单独成组。 -->
+          <div class="login-flow__actions">
+            <button type="button" class="btn" data-action="login-retry" data-role="login-retry" hidden data-i18n="accounts.add.login.retry">重试</button>
+          </div>
+        </div>
+
+        <!-- tab 2：导入凭据（「本机文件」+「选择文件」两个 tab 合并而来）。
+             两者读的是同一种文件，区别只在读的位置；而「本机」在老 tab 里指的是
+             **服务端**那台机器，对浏览器用户是误导。现在一个 tab，内部选来源，
+             浏览器选文件是主路径（推荐、默认）。
+
+             手工 key 对也在这一格里（可选）：它与凭据文件落到同一个凭据形状
+             （与凭据文件同一种形状），单开一个入口只会让人以为它是另一种账号。 -->
+        <div data-add-panel="credential" class="field-grid" hidden>
+          <div class="field-cell">
+            <span class="field-cell__label" data-i18n="accounts.add.credential.source">凭据来源</span>
+            <div class="choice-list" role="radiogroup" data-role="add-credential-sources" data-i18n-attr="aria-label:accounts.add.credential.source" aria-label="凭据来源">
+              <label class="choice" for="add-source-browser">
+                <input class="choice__input" id="add-source-browser" type="radio" name="add-credential-source" value="browser" data-role="add-source-browser" checked />
+                <span class="choice__text">
+                  <span class="choice__title" data-i18n="accounts.add.credential.browser">从本机选择文件</span>
+                  <span class="choice__hint" data-i18n="accounts.add.credential.browserHint">推荐：在浏览器里选一个凭据文件，内容只读进内存、不落盘。</span>
+                </span>
+              </label>
+              <label class="choice" for="add-source-server">
+                <input class="choice__input" id="add-source-server" type="radio" name="add-credential-source" value="server" />
+                <span class="choice__text">
+                  <span class="choice__title" data-i18n="accounts.add.credential.server">使用服务端文件</span>
+                  <span class="choice__hint" data-i18n="accounts.add.credential.serverHint">读代理跑的那台机器上的 ZCode 认证文件。</span>
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <!-- 来源 A：浏览器选文件（默认）。`hidden` 的 file input 用 `<label class="btn"
+               for=…>` 代点：只靠原生 label 行为就能开选择框，不需要再绑一个 click 动作。 -->
+          <div class="field-cell" data-add-group="browser">
+            <span class="field-cell__label" data-i18n="accounts.add.credential.file">凭据文件</span>
+            <span class="row">
+              <input id="add-credential-file" type="file" data-role="add-file-picker" accept=".json,application/json" aria-hidden="true" tabindex="-1" hidden />
+              <label class="btn" for="add-credential-file" data-i18n="accounts.add.credential.pick">选择文件</label>
+              <span class="hint hint--clip" data-role="add-file-name"></span>
+            </span>
+            <div class="hint" data-i18n="accounts.add.credential.fileHint">能识别 ZCode 凭据文件、本工具的导出包与直接粘贴的 JWT。</div>
+          </div>
+
+          <!-- 来源 B：服务端路径（ZCode 客户端就在这台机器上时用）。
+               扫描列表与输入框同在一个字段格里：卡片、输入框、「API key 对」
+               三者的左边缘因此是同一条竖线（W…「扫描卡片顶出控件列」的修法）。 -->
+          <div class="field-cell" data-add-group="server" hidden>
+            <label class="field-cell__label" for="add-file-path" data-i18n="accounts.add.file.path">文件路径</label>
+            <input
+              class="field"
+              id="add-file-path"
+              type="text"
+              data-role="add-file-path"
+              data-i18n-attr="placeholder:accounts.add.file.pathHint"
+            />
+            <div class="hint" data-i18n="accounts.add.file.hint">只读扫描本机 ZCode 认证文件，内容不外传。</div>
+            <ul class="order-list" data-role="add-sources"></ul>
+            <div class="hint" data-role="add-sources-none" hidden data-i18n="accounts.add.file.none">没有找到本机认证文件，可以手动填写路径。</div>
+          </div>
+
+          <!-- 可选：手工 key 对（与凭据文件同一个凭据形状） -->
+          <div class="field-cell">
+            <label class="field-cell__label" for="add-api-key" data-i18n="accounts.add.manual.label">API key 对</label>
+            <input
+              class="field"
+              id="add-api-key"
+              type="text"
+              autocomplete="off"
+              data-role="add-api-key"
+              data-i18n-attr="placeholder:accounts.add.manual.placeholder"
+            />
+            <div class="hint" data-i18n="accounts.add.manual.hint">手工粘贴套餐凭据 {apiKeyId}.{secret}，与凭据文件导入落到同一个账号形状。</div>
+          </div>
+
+          <div class="field-cell">
+            <label class="field-cell__label" for="add-file-provider" data-i18n="accounts.add.provider">凭据出身</label>
+            <select class="select" id="add-file-provider" data-role="add-provider"></select>
+          </div>
+        </div>
+
+        <!-- tab 3：粘贴 JWT -->
+        <div data-add-panel="jwt" class="field-grid" hidden>
+          <div class="field-cell">
+            <label class="field-cell__label" for="add-jwt" data-i18n="accounts.add.jwt.label">JWT 原文</label>
+            <textarea
+              class="field field--area"
+              id="add-jwt"
+              data-role="add-jwt"
+              data-i18n-attr="placeholder:accounts.add.jwt.hint"
+            ></textarea>
+          </div>
+          <div class="field-cell">
+            <label class="field-cell__label" for="add-jwt-provider" data-i18n="accounts.add.provider">凭据出身</label>
+            <select class="select" id="add-jwt-provider" data-role="add-provider"></select>
+            <div class="hint" data-i18n="accounts.add.provider.hint" data-i18n-attr="title:accounts.add.provider.hint">JWT 的 payload 里没有 provider 字段，所以要在这里选。</div>
+          </div>
+        </div>
+
+        <!-- 账号名只服务于三个导入 tab：登录由控制面自己建号（label 从账号信息里来）。 -->
+        <div class="field-cell" data-role="add-label-row">
+          <label class="field-cell__label" for="add-label" data-i18n="accounts.add.label">账号名</label>
+          <input class="field" id="add-label" type="text" data-role="add-label" data-i18n-attr="placeholder:accounts.add.labelHint" />
+          <div class="hint" data-i18n="accounts.add.labelUnique" data-i18n-attr="title:accounts.add.labelUnique">唯一引用键：建号之后用它引用这个账号。</div>
+        </div>
+      </div>
+      <div class="modal__footer">
+        <button type="button" class="btn" data-action="close-add" data-i18n="common.cancel">取消</button>
+        <button
+          type="button"
+          class="btn btn--primary"
+          data-action="submit-add"
+          data-role="submit-add"
+          data-i18n="accounts.add.submit"
+        >
+          添加
+        </button>
+      </div>
+    </div>
+
+    <!-- 创建 API key：输入名称 → 显示完整 key 一次 → 复制 → 关闭。
+         两个状态在同一个模态里切换，而不是开第二个弹窗：用户点完「创建」看到的应该
+         是刚拿到的东西，不是又一个要点「确定」的框。关闭之后还能从列表里再次
+         显示 / 复制（服务端解密带回），但「创建一刻的完整展示」仍是确认仪式。
+         开合同上（`App.widgets.dialog`）。 -->
+    <div class="modal-scrim" data-role="keys-create-scrim" data-dialog-scrim="keys-create" data-dialog-close="keys-create" hidden></div>
+    <div
+      class="modal"
+      data-role="keys-create-modal"
+      data-dialog="keys-create"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="keys-create-title"
+      hidden
+    >
+      <div class="modal__head">
+        <span class="modal__title" id="keys-create-title" data-i18n="keys.create.title">创建 API key</span>
+      </div>
+      <div class="modal__body">
+        <div class="field-grid" data-role="keys-create-form">
+          <div class="field-cell">
+            <label class="field-cell__label" for="keys-create-name" data-i18n="keys.create.name">名称</label>
+            <input
+              class="field"
+              id="keys-create-name"
+              type="text"
+              autocomplete="off"
+              data-role="keys-create-name"
+              data-i18n-attr="placeholder:keys.create.namePlaceholder"
+            />
+            <span class="hint" data-i18n="keys.create.nameHint">起一个能认出用途的名字，例如 claude-code-laptop。</span>
+          </div>
+          <div class="hint" data-role="keys-create-error" role="alert" hidden></div>
+        </div>
+        <div data-role="keys-create-result" hidden>
+          <p class="hint" data-i18n="keys.create.once">完整 key 只显示这一次。关掉这个框之后只能重新建一把。</p>
+          <input class="field mono" type="text" readonly data-role="keys-create-key" aria-label="API key" />
+          <div class="hint" data-i18n="keys.create.usageHint">客户端把它填在 API key / Authorization: Bearer 那一栏。</div>
+        </div>
+      </div>
+      <div class="modal__footer">
+        <button type="button" class="btn" data-action="keys-close-create" data-i18n="common.close">关闭</button>
+        <button type="button" class="btn" data-action="keys-copy" data-role="keys-copy" data-i18n="keys.create.copy" hidden>复制</button>
+        <button
+          type="button"
+          class="btn btn--primary"
+          data-action="keys-submit-create"
+          data-role="keys-submit-create"
+          data-i18n="keys.create.submit"
+        >
+          创建
+        </button>
+      </div>
+    </div>
+
+    <!-- 新建 / 编辑代理：同一个弹窗，靠 `proxies-modal-title` 与提交的命令区分。
+         密码框永远不回填（服务端只回 `hasPassword`），留空表示保持不变；要清掉已保存的
+         密码得勾一下，因为对回显不出来的字段，「空」与「和原来一样」是两件事。
+
+         它挂 `data-dialog`（不是自管 `hidden`）：这个弹窗是从出口代理抽屉里打开的，
+         叠在抽屉上面，Esc 必须按「先关它、再关抽屉」的顺序退（见 app-widgets.js 的
+         `closeTopDialog`）——而那个顺序只有 dialog 的打开记录知道。 -->
+    <div class="modal-scrim" data-role="proxies-scrim" data-dialog-scrim="proxies-form" data-action="proxies-close" hidden></div>
+    <div
+      class="modal"
+      data-role="proxies-modal"
+      data-dialog="proxies-form"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="proxies-modal-title"
+      hidden
+    >
+      <div class="modal__head">
+        <span class="modal__title" id="proxies-modal-title" data-role="proxies-modal-title" data-i18n="proxies.add.title">
+          添加代理
+        </span>
+      </div>
+      <div class="modal__body">
+        <div class="banner banner--danger" data-role="proxies-modal-error" role="alert" hidden></div>
+
+        <div class="field-grid">
+          <div class="field-cell">
+            <label class="field-cell__label" for="proxies-name" data-i18n="proxies.form.name">名称</label>
+            <input class="field" id="proxies-name" type="text" autocomplete="off" data-role="proxies-name" />
+            <span class="hint" data-i18n="proxies.form.nameHint">账号与默认出口都用这个名字引用。</span>
+          </div>
+
+          <div class="field-cell">
+            <label class="field-cell__label" for="proxies-url" data-i18n="proxies.form.url">地址</label>
+            <input class="field mono" id="proxies-url" type="text" autocomplete="off" data-role="proxies-url" />
+            <span class="hint" data-i18n="proxies.form.urlHint">http:// / https:// / socks5:// / socks5h://，前缀不能省。</span>
+          </div>
+
+          <div class="field-cell">
+            <label class="field-cell__label" for="proxies-username" data-i18n="proxies.form.username">用户名（可选）</label>
+            <input class="field" id="proxies-username" type="text" autocomplete="off" data-role="proxies-username" />
+          </div>
+
+          <div class="field-cell">
+            <label class="field-cell__label" for="proxies-password" data-i18n="proxies.form.password">密码（可选）</label>
+            <input
+              class="field"
+              id="proxies-password"
+              type="password"
+              autocomplete="new-password"
+              data-role="proxies-password"
+            />
+            <span class="hint" data-i18n="proxies.form.secretHint">编辑时留空表示保持不变。</span>
+          </div>
+
+          <div class="field-cell field-cell--inline field-cell--span" data-role="proxies-clear-row" hidden>
+            <label class="field-cell__label" for="proxies-clear-password" data-i18n="proxies.form.clearPassword">清除已保存的密码</label>
+            <label class="switch">
+              <input
+                class="switch__input"
+                id="proxies-clear-password"
+                type="checkbox"
+                data-role="proxies-clear-password"
+              />
+            </label>
+          </div>
+        </div>
+      </div>
+      <div class="modal__footer">
+        <button type="button" class="btn" data-action="proxies-close" data-i18n="common.cancel">取消</button>
+        <button type="button" class="btn btn--primary" data-action="proxies-submit" data-i18n="proxies.form.submit">
+          保存
+        </button>
+      </div>
+    </div>
+
+    <!-- 删除账号：默认 drain，force 需二次确认。开合同上
+         （`App.widgets.dialog`，`data-dialog="delete"`）。 -->
+    <div class="modal-scrim" data-role="delete-modal-scrim" data-dialog-scrim="delete" data-dialog-close="delete" hidden></div>
+    <div
+      class="modal"
+      data-role="delete-modal"
+      data-dialog="delete"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="delete-modal-title"
+      hidden
+    >
+      <div class="modal__head">
+        <span class="modal__title" id="delete-modal-title" data-role="delete-modal-title"></span>
+      </div>
+      <div class="modal__body">
+        <div data-role="delete-modal-text"></div>
+        <div class="field-cell field-cell--inline">
+          <label class="field-cell__label" for="delete-force" data-i18n="accounts.delete.force">强制中断在飞请求</label>
+          <label class="switch">
+            <input class="switch__input" id="delete-force" type="checkbox" data-role="delete-force" />
+          </label>
+          <span class="hint" data-i18n="accounts.delete.force.hint">勾选后需再次确认。</span>
+        </div>
+        <div class="hint" data-role="delete-modal-hint"></div>
+      </div>
+      <div class="modal__footer">
+        <button type="button" class="btn" data-action="close-delete" data-i18n="common.cancel">取消</button>
+        <button
+          type="button"
+          class="btn btn--primary"
+          data-action="submit-delete"
+          data-role="delete-confirm"
+          data-i18n="accounts.delete.confirm"
+        >
+          删除
+        </button>
+      </div>
+    </div>
+
+    <!-- 账号详情大窗：居中模态（920px，`--layout-modal-lg`），不是
+         右侧 440px 抽屉。壳是静态的（重渲染不动它），内容由 app-view-accounts.js
+         在打开与每拍轮询后重画。开合状态在 App.widgets 的模块级 Map（DOM 的
+         `hidden` 只是投影），关闭语义（关闭键 / 遮罩 / Esc）与焦点管理都在 widgets
+         层。壳排在二次确认模态之前：同 z-index 下后出现的模态（确认框）盖在大窗上。 -->
+    <div class="modal-scrim" data-role="account-dialog-scrim" data-dialog-scrim="account" data-dialog-close="account" hidden></div>
+    <div
+      class="modal modal--lg"
+      data-role="account-dialog"
+      data-dialog="account"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="account-dialog-title"
+      hidden
+    >
+      <div class="modal__head">
+        <h2 class="modal__title" id="account-dialog-title" data-role="account-dialog-title"></h2>
+        <!-- 类型标签（体验 / 订阅 / 双套餐）与 ID 前缀：凭据出身（kind）不在这里，
+             它在行尾 ⋯ 菜单里（术语纠正：类型标签只说套餐，不说凭据出身）。 -->
+        <span class="modal__meta" data-role="account-dialog-meta"></span>
+        <div class="modal__actions">
+          <button type="button" class="btn" data-action="accounts-refresh-quota" data-i18n="accounts.quota.refresh">刷新</button>
+        </div>
+        <button type="button" class="modal__close" data-dialog-close="account" data-i18n-attr="aria-label:common.close" aria-label="关闭">×</button>
+      </div>
+      <div class="modal__body" data-role="account-dialog-body"></div>
+    </div>
+
+    <!-- 二次确认：L3 变更一律走模态，不用原生 `confirm()`。
+         `.modal confirm` = 复用模态的一切，只把宽度收窄。
+         开合、Esc 与遮罩都走 `App.widgets.dialog`，取消路径（`onCancel` 回滚）
+         挂在 dialog 的 `onDismiss` 上：Esc 与「取消」键必须做同一件事，否则
+         控件会停在服务端并不认可的值上。 -->
+    <div class="modal-scrim" data-role="confirm-scrim" data-dialog-scrim="confirm" data-dialog-close="confirm" hidden></div>
+    <div
+      class="modal confirm"
+      data-role="confirm-modal"
+      data-dialog="confirm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="confirm-title"
+      hidden
+    >
+      <div class="modal__head">
+        <span class="modal__title" id="confirm-title" data-role="confirm-title"></span>
+      </div>
+      <div class="modal__body">
+        <div class="confirm__text" data-role="confirm-text"></div>
+        <div class="confirm__warn" data-role="confirm-warn" hidden></div>
+        <div class="field-cell" data-role="confirm-input-row" hidden>
+          <!-- 要输入的确认词由调用方给（明文导出 = EXPORT，批量删除 = DELETE）：
+               静态文案只是默认值，`App.confirm.open` 每次开合都按 options.tokenLabel
+               重写一次，所以这里不能只靠 data-i18n 的静态翻译。 -->
+          <label class="field-cell__label" for="confirm-input" data-role="confirm-token-label" data-i18n="settings.export.confirmToken">输入 EXPORT 以确认</label>
+          <input class="field" id="confirm-input" type="text" autocomplete="off" data-role="confirm-input" />
+        </div>
+      </div>
+      <div class="modal__footer">
+        <button type="button" class="btn" data-action="close-confirm" data-i18n="common.cancel">取消</button>
+        <button
+          type="button"
+          class="btn btn--confirm-danger"
+          data-action="submit-confirm"
+          data-role="confirm-submit"
+          data-i18n="common.confirm"
+        >
+          确认
+        </button>
+      </div>
+    </div>
+
+    <!-- 出口代理：账号页「出口代理」按钮打开的管理面。
+         代理不是主实体，是账号属性「出口」的命名字典，所以它没有独立视图、没有
+         自己的路径，而是这一页里的一只浮层。形态直接复用 `.modal--lg`（右侧
+         抽屉并进大模态之后就只剩这一套浮层体系）：920px 排得开五列的表，窄屏按
+         `.modal--lg` 自己的断点退成全屏。开合 / Esc / 焦点归还都在
+         `App.widgets.dialog`（`data-dialog="proxies"`），视图只调 open / close。
+
+         壳排在这一层的末尾：抽屉里的停用 / 删除与账号表的删除都走二次确认，同
+         z-index 下确认框必须盖在抽屉上（文档序在后的在上），否则点到「删除」之后
+         那个模态会藏在抽屉底下。
+
+         「添加代理」只有这一颗（抽屉头部），空态不再重复挂一颗：同一个动作在同一块
+         面上出现两次，只会让人以为它们是两条路。 -->
+    <div class="modal-scrim" data-dialog-scrim="proxies" data-dialog-close="proxies" hidden></div>
+    <div
+      class="modal modal--lg"
+      data-dialog="proxies"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="proxies-drawer-title"
+      hidden
+    >
+      <div class="modal__head">
+        <h2 class="modal__title" id="proxies-drawer-title" data-i18n="proxies.drawer.title">出口代理</h2>
+        <div class="modal__actions">
+          <button type="button" class="btn btn--primary" data-action="proxies-open-add" data-i18n="proxies.add">
+            添加代理
+          </button>
+        </div>
+        <button
+          type="button"
+          class="modal__close"
+          data-dialog-close="proxies"
+          data-i18n-attr="aria-label:common.close"
+          aria-label="关闭"
+        >
+          ×
+        </button>
+      </div>
+      <div class="modal__body" data-role="proxies-drawer-body">
+        <div class="banner banner--danger" data-role="proxies-error" role="alert" hidden>
+          <span data-role="proxies-error-text"></span>
+          <span class="toolbar__spacer"></span>
+          <button type="button" class="btn" data-action="proxies-dismiss-error" data-i18n="common.close">关闭</button>
+        </div>
+
+        <div class="banner banner--ok" data-role="proxies-notice" role="status" hidden>
+          <span data-role="proxies-notice-text"></span>
+        </div>
+
+        <!-- `.panel` 仍然留着：表在窄屏上靠 `.panel:has(> .table)` 横向滚，
+             拆掉面板这一层就只剩页面级横向滚动条。 -->
+        <section class="panel">
+          <table class="table" data-role="proxies-table">
+            <caption class="table__caption" data-i18n="proxies.drawer.title">出口代理</caption>
+            <thead>
+              <tr>
+                <th scope="col" data-i18n="proxies.table.name">名称</th>
+                <th scope="col" data-i18n="proxies.table.url">地址</th>
+                <th scope="col" data-i18n="proxies.table.status">状态</th>
+                <th scope="col" data-i18n="proxies.table.usedBy">使用中</th>
+                <th scope="col" class="col-actions" data-i18n="proxies.table.actions">操作</th>
+              </tr>
+            </thead>
+            <tbody data-role="proxies-body"></tbody>
+          </table>
+
+          <!-- 空态只占抽屉宽度：它是这一块「还没有内容」的引导，不是整页的空白。 -->
+          <div class="empty" data-role="proxies-empty" hidden>
+            <div class="empty__title" data-i18n="proxies.empty.title">还没有代理</div>
+            <div class="empty__hint" data-i18n="proxies.empty.hint">
+              加一条命名代理，账号页就能按名字给账号分出口。多个账号共用一台机器的地址，正是风控最在意的那一项。
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- 撤销条：删除会话不要二次确认，改成「先删 + 5 秒内可撤销」。
+         它是第三个真浮层类型（前两类：模态 / 登录卡）：不遮罩、不锁底层滚动、
+         不抢焦点，只在右下角浮一条。开合投影同其他浮层——`hidden`。 -->
+    <div class="toast" data-role="toast" role="status" aria-live="polite" hidden>
+      <span class="toast__text" data-role="toast-text"></span>
+      <button
+        type="button"
+        class="btn toast__action"
+        data-role="toast-action"
+        data-i18n="chat.sessions.undo"
+        hidden
+      >
+        撤销
+      </button>
+    </div>
+
+    <script type="application/json" id="i18n-dicts">
+      /* I18N */
+    </script>
+    <!--
+      运行时不是单个文件：`page.ts` 把 app-constants / app-state / app-dom /
+      app-i18n / app-api / app-sse 与五个视图按依赖顺序拼成一段，再替换下面这一行。
+      拼接顺序就是依赖顺序，前面定义的东西后面的能用。
+    -->
+    <script>
+      /* APP */
+    </script>
+  </body>
+</html>

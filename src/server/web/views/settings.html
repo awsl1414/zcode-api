@@ -1,0 +1,477 @@
+          <!-- ⑤ 设置页：四层配置。
+               主区（连接 + 服务）常驻置顶；账户自成一层；高级区（功能开关 + 身份）
+               默认折叠；页脚是系统操作（版本 + 检查更新 / 退出进程）。
+               锁定项（R1 deviceMid / R2 session 隔离）不在这里，它们不是配置项。
+               改动写进 config.yaml 后就地热重载：A / B 类保存即生效，C 类
+               （端口 / 绑定地址）重启后随新配置起监听；二次确认走模态。
+
+               「我的账户」不是独立页：用户名 / 改密码 / 退出登录并进「账户」组。
+               主题与语言在顶栏右侧（它们是随时可能切的本机偏好，顶栏
+               全局可见才是它们的位置）。 -->
+          <div class="page medium" data-view="settings" hidden>
+            <!-- PageHeader：标题 + 一句说明。
+                 本页是逐字段自动保存，所以没有参考图里的「保存配置」按钮——
+                 那个交互在本项目里不存在（保存就是改字段本身）。页头也不放
+                 「重新读取」：重读配置文件收敛到顶栏那颗刷新按钮（这一页的
+                 refresh 就是 `/api/settings` 重拉）。 -->
+            <header class="page-header">
+              <div class="page-header__heading">
+                <h1 class="page-title" data-i18n="nav.settings">设置</h1>
+                <p class="page-header__desc" data-i18n="settings.description">
+                  系统运行、连接、身份与服务等全局配置。
+                </p>
+              </div>
+            </header>
+            <div class="page-body">
+
+            <div class="banner banner--danger" data-role="settings-error" role="alert" hidden>
+              <span data-role="settings-error-text"></span>
+              <span class="toolbar__spacer"></span>
+              <button type="button" class="btn" data-action="dismiss-settings-error" data-i18n="common.close">关闭</button>
+            </div>
+            <div class="banner banner--ok" data-role="settings-notice" role="status" hidden>
+              <span data-role="settings-notice-text"></span>
+            </div>
+
+            <!-- 热重载后的全局提示只剩环境变量那一件事：「要不要重启」
+                 不再是页面级的一句话，而是挂在字段上 —— C 类字段的「需重启」徽章
+                 带 title 说明，A / B 类保存后顶部短暂提示「已生效」。
+                 这两条页级只读信息并成一行（环境变量优先级 + 配置文件落点
+                 说的是同一件事的两头），省下一整行 20px 的区块间距。 -->
+            <div class="settings-meta">
+              <span class="hint" data-i18n="settings.envHint">以 ZCODE_ 开头的环境变量优先于配置文件。</span>
+              <span class="hint">
+                <span data-i18n="settings.configPath">配置文件</span> ·
+                <span class="mono" data-role="settings-configPath">—</span>
+              </span>
+            </div>
+
+            <!--
+              四层结构（自上而下的常驻度）：
+
+                主区   连接 · 服务     会被反复改的字段，两列并排，置顶
+                账户   独立一层         登录身份与改密码
+                高级   折叠区（默认收起）功能开关 · 身份
+                页脚   系统操作         版本 + 检查更新 / 退出进程
+
+              五组平铺时，功能开关（8 格）与身份（2 格）这两组低频配置和连接参数
+              一样占着首屏；收进默认折叠的高级区之后，首屏只剩连接与服务，展开
+              一次就回到它们。页脚把「版本 + 检查更新」「退出进程」从服务组的字段格里
+              提出来：它们不是配置（写不进 YAML，也不参与热重载），一个是查询动作、
+              一个是终止进程的危险动作用，与端口、绑定地址混排只会让后者看起来同样危险。
+
+              说明按「常驻 4 条、其余收进 ⓘ」分档（`app-view-settings.js` 的文件头有
+              为什么是这四条）：常驻的是绑定地址、需要 API key、身份归一、额度耗尽阈值
+              ——它们的后果在改的那一刻就要看见。其余说明折进字段下方的 ⓘ（`<details>`，
+              悬停读 title、点开读全文），字段格因此只剩标签 + 控件两行。
+            -->
+            <div class="settings-grid">
+              <!-- 连接（默认 model / 会话亲和模式 / TTL / 会话上限 / 推理强度）。
+                   分组标题带一枚装饰图标（对齐参考图的卡片头）。
+                   组内两列字段格：每一格 = 标签 / 控件 / ⓘ（说明收在图标里）。 -->
+              <section class="group" data-group="connection">
+                <h2 class="group__title"><svg class="group__icon" aria-hidden="true" focusable="false"><use href="#icon-link" /></svg><span data-i18n="settings.group.connection">连接</span></h2>
+                <div class="group__body field-grid">
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="settings-default-model" data-i18n="settings.defaultModel">默认 model</label>
+                    <select class="select" id="settings-default-model" data-role="settings-defaultModel"></select>
+                    <details class="hint-details hint-details--icon">
+                      <summary data-i18n-attr="title:settings.defaultModel.hint,aria-label:settings.defaultModel.hint"></summary>
+                      <p class="hint-details__more" data-i18n="settings.defaultModel.hint">客户端请求没写 model 时用这个模型兜底。</p>
+                    </details>
+                  </div>
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="settings-client-mode" data-i18n="settings.clientIdentityMode">会话亲和模式</label>
+                    <select class="select" id="settings-client-mode" data-role="settings-clientMode"></select>
+                    <details class="hint-details hint-details--icon">
+                      <summary data-i18n-attr="title:settings.clientIdentityMode.hint,aria-label:settings.clientIdentityMode.hint"></summary>
+                      <p class="hint-details__more" data-i18n="settings.clientIdentityMode.hint">从请求内容推断会话，让同一段对话拿到稳定的会话 id（缓存亲和，也更像官方客户端）。</p>
+                    </details>
+                  </div>
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="settings-client-ttl" data-i18n="settings.clientIdentityTtl">会话 TTL（秒）</label>
+                    <input class="field field--num" id="settings-client-ttl" type="number" min="1" step="60" data-role="settings-clientTtl" />
+                    <details class="hint-details hint-details--icon">
+                      <summary data-i18n-attr="title:settings.clientIdentityTtl.hint,aria-label:settings.clientIdentityTtl.hint"></summary>
+                      <p class="hint-details__more" data-i18n="settings.clientIdentityTtl.hint">推断出的会话闲置这么久就算过期，之后的请求按新会话处理。</p>
+                    </details>
+                  </div>
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="settings-client-max" data-i18n="settings.clientIdentityMaxSessions">会话上限</label>
+                    <input class="field field--num" id="settings-client-max" type="number" min="1" step="1" data-role="settings-clientMaxSessions" />
+                    <details class="hint-details hint-details--icon">
+                      <summary data-i18n-attr="title:settings.clientIdentityMaxSessions.hint,aria-label:settings.clientIdentityMaxSessions.hint"></summary>
+                      <p class="hint-details__more" data-i18n="settings.clientIdentityMaxSessions.hint">最多同时记住多少个会话，超出的按最久未用淘汰；是本进程的内存上限。</p>
+                    </details>
+                  </div>
+                  <!-- 推理强度：模式 + 档位一对。mode=透传时档位控件禁用
+                       （值仅存——切回覆盖时不丢已选档位，联动逻辑在 app-view-settings.js）。 -->
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="settings-reasoning-mode" data-i18n="settings.reasoningMode">推理强度</label>
+                    <select class="select" id="settings-reasoning-mode" data-role="settings-reasoningMode"></select>
+                    <details class="hint-details hint-details--icon">
+                      <summary data-i18n-attr="title:settings.reasoningMode.hint,aria-label:settings.reasoningMode.hint"></summary>
+                      <p class="hint-details__more" data-i18n="settings.reasoningMode.hint">透传：客户端说了算，代理不改写。覆盖：所有推理模型的请求统一按下面选的档位出线。</p>
+                    </details>
+                  </div>
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="settings-reasoning-effort" data-i18n="settings.reasoningEffort">推理档位</label>
+                    <select class="select" id="settings-reasoning-effort" data-role="settings-reasoningEffort"></select>
+                    <details class="hint-details hint-details--icon">
+                      <summary data-i18n-attr="title:settings.reasoningEffort.hint,aria-label:settings.reasoningEffort.hint"></summary>
+                      <p class="hint-details__more" data-i18n="settings.reasoningEffort.hint">覆盖模式生效；透传时仅保存不参与逻辑。关闭 = thinking 禁用（glm-5.3-flash 有效；glm-5.3 上游无法真正禁用，等同最低档）。</p>
+                    </details>
+                  </div>
+                </div>
+              </section>
+
+              <!-- 服务：端口 L1；绑定地址与「需要 API key」开关是 L3，改前二次确认。
+                   登录在账号页；版本与检查更新、退出进程在页脚（它们不是配置）。
+                   地址与运行时长不在这里，顶栏已经有。 -->
+              <section class="group" data-group="service">
+                <h2 class="group__title"><svg class="group__icon" aria-hidden="true" focusable="false"><use href="#icon-server" /></svg><span data-i18n="settings.group.service">服务</span></h2>
+                <div class="group__body field-grid">
+                  <div class="field-cell">
+                    <!-- C 类字段：标签下挂「需重启」徽章（来自
+                         RESTART_REQUIRED 的静态标注）；data-i18n 移到内层 span，
+                         否则 applyI18n 写 textContent 时会把徽章抹掉。
+                         徽章的 title 是那句「此项写入配置文件，需要重启代理进程才生效」
+                         ——它是后果型提示，常驻位置是徽章本身。 -->
+                    <label class="field-cell__label" for="settings-port">
+                      <span data-i18n="settings.port">端口</span>
+                      <span class="status-badge status-badge--warn" data-reload="restart" data-i18n="settings.badge.restart" data-i18n-attr="title:settings.restartHint">需重启</span>
+                    </label>
+                    <input class="field field--num" id="settings-port" type="number" min="1" max="65535" step="1" data-role="settings-port" />
+                    <!-- C 类：监听器热改做不到不抖动，重启后随新配置起监听。 -->
+                    <details class="hint-details hint-details--icon">
+                      <summary data-i18n-attr="title:settings.port.hint,aria-label:settings.port.hint"></summary>
+                      <p class="hint-details__more" data-i18n="settings.port.hint">代理与控制面共用这一个监听端口。</p>
+                    </details>
+                  </div>
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="settings-host">
+                      <span data-i18n="settings.host">绑定地址</span>
+                      <span class="status-badge status-badge--warn" data-reload="restart" data-i18n="settings.badge.restart" data-i18n-attr="title:settings.restartHint">需重启</span>
+                    </label>
+                    <input class="field" id="settings-host" type="text" data-role="settings-host" />
+                    <!-- 常驻说明之一：改到非回环地址是安全后果，改的那一刻就要看见。 -->
+                    <p class="hint" data-i18n="settings.host.hint">改到非回环地址会让控制面暴露到网络。</p>
+                  </div>
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="settings-require-key" data-i18n="settings.requireKey">需要 API key</label>
+                    <span class="row">
+                      <label class="switch">
+                        <input class="switch__input" id="settings-require-key" type="checkbox" data-role="settings-requireKey" />
+                      </label>
+                    </span>
+                    <!-- 常驻说明之二：关掉它等于把代理开放给任何能连到端口的人。 -->
+                    <p class="hint" data-i18n="settings.requireKey.hint">关掉之后任何能连到这个端口的人都能直接用代理。key 在「API key」页管理。</p>
+                  </div>
+                  <!-- key 本身在独立的 `/keys` 页：这里只留一个文字链接，不重复那页的内容。 -->
+                  <div class="field-cell">
+                    <span class="field-cell__label" data-i18n="settings.apiKeys">API key</span>
+                    <span class="row">
+                      <a class="link" href="/keys" data-i18n="settings.apiKeys.manage">管理 API key</a>
+                    </span>
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <!-- 账户（吸收了「我的账户」页）：当前登录的人、改密码、退出登录。
+                 这三件事只用三行字，不值得独立成一页——那会让导航多一项、
+                 顶栏多一处入口。
+                 四个字段排成 2×2，按钮行跨两列靠右。
+                 它不与其它层并排：账户是「这个人是谁」，与系统配置不同类，
+                 独占一层整宽。 -->
+            <section class="group" data-group="account" id="account">
+              <h2 class="group__title"><svg class="group__icon" aria-hidden="true" focusable="false"><use href="#icon-circle-user-round" /></svg><span data-i18n="settings.group.account">账户</span></h2>
+              <div class="group__body field-grid">
+                <div class="field-cell">
+                  <span class="field-cell__label" data-i18n="account.username">用户名</span>
+                  <input class="field" type="text" data-role="account-username" readonly aria-readonly="true" value="—" />
+                </div>
+                <div class="field-cell">
+                  <label class="field-cell__label" for="account-current-password" data-i18n="account.password.current">
+                    当前密码
+                  </label>
+                  <input
+                    class="field"
+                    id="account-current-password"
+                    type="password"
+                    autocomplete="current-password"
+                    data-role="account-currentPassword"
+                  />
+                </div>
+                <div class="field-cell">
+                  <label class="field-cell__label" for="account-new-password" data-i18n="account.password.new">新密码</label>
+                  <input
+                    class="field"
+                    id="account-new-password"
+                    type="password"
+                    autocomplete="new-password"
+                    data-role="account-newPassword"
+                  />
+                </div>
+                <div class="field-cell">
+                  <label class="field-cell__label" for="account-confirm-password" data-i18n="account.password.confirm">
+                    确认密码
+                  </label>
+                  <input
+                    class="field"
+                    id="account-confirm-password"
+                    type="password"
+                    autocomplete="new-password"
+                    data-role="account-confirmPassword"
+                  />
+                </div>
+
+                <!-- 改密码的两条结果横幅留在这个组里：它们说的是同一次写入。
+                     占整行（不分列），失败文案一字不改。 -->
+                <div class="banner banner--danger" data-role="account-error" role="alert" hidden>
+                  <span data-role="account-error-text"></span>
+                </div>
+                <div class="banner banner--ok" data-role="account-notice" role="status" hidden>
+                  <span data-role="account-notice-text"></span>
+                </div>
+
+                <!-- 动作行：跨两列，按钮组靠右（`justify-content: flex-end`）。
+                     「改完之后其他设备上的登录会失效」收进保存键的 title：它说的是
+                     这一颗按钮的后果，页面不再为它占一行。 -->
+                <div class="field-cell field-actions">
+                  <button
+                    type="button"
+                    class="btn btn--primary"
+                    data-action="account-save-password"
+                    data-i18n="account.password.save"
+                    data-i18n-attr="title:account.password.hint"
+                  >
+                    保存
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn--danger"
+                    data-action="account-logout"
+                    data-i18n="account.logout"
+                  >
+                    退出登录
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            <!-- 高级区：功能开关 + 身份，默认折叠，刷新后仍折叠。
+                 开合不用 `App.widgets` 的折叠区：那一套把状态写进 sessionStorage，
+                 刷新会回到上次的状态；这里要的是「每次进页面都是收起的」。所以状态
+                 只活在这次 DOM 里（静态标记默认收起，开合由 `app-view-settings.js`
+                 直接翻 `hidden` 与 `aria-expanded`），不落任何存储。
+                 形态复用折叠区的标题行与箭头（`.collapse__head` / `.collapse__chevron`），
+                 容器自己不画框：里面两格 `.group` 已经是卡，外面再套一层就是双层框
+                 （AGENTS 的双层框禁令）。收起时摘要「功能开关 · 身份」留在标题行，
+                 展开后它只是复述，不再显示。 -->
+            <section class="settings-advanced collapse--summary-when-closed" data-collapse-open="false">
+              <button type="button" class="collapse__head" data-advanced-toggle aria-expanded="false" aria-controls="settings-advanced-body">
+                <svg class="collapse__chevron" aria-hidden="true" focusable="false">
+                  <use href="#icon-chevron-down" />
+                </svg>
+                <h2 class="collapse__title" data-i18n="settings.advanced.title">高级</h2>
+                <span class="collapse__summary" data-i18n="settings.advanced.summary">功能开关 · 身份</span>
+              </button>
+              <div class="collapse__body" id="settings-advanced-body" hidden>
+                <!-- 功能开关（i18n 键与快照段名保持
+                     settings.subsystems 不变——文案与标识符脱钩）：四个总开关 + dump
+                     + 额度采样两个参数。开关是行内小件，标签与开关同一行。
+                     ≥1024px 时组内排四列（8 格排成两行）。 -->
+                <section class="group" data-group="subsystems">
+                  <h2 class="group__title"><svg class="group__icon" aria-hidden="true" focusable="false"><use href="#icon-layers" /></svg><span data-i18n="settings.group.subsystems">功能开关</span></h2>
+                  <div class="group__body field-grid">
+                    <div class="field-cell field-cell--inline">
+                      <label class="field-cell__label" for="settings-highspeed" data-i18n="settings.highspeed">加速卡</label>
+                      <label class="switch">
+                        <input class="switch__input" id="settings-highspeed" type="checkbox" data-role="settings-highspeed" />
+                      </label>
+                      <details class="hint-details hint-details--icon">
+                        <summary data-i18n-attr="title:settings.highspeed.hint,aria-label:settings.highspeed.hint"></summary>
+                        <p class="hint-details__more" data-i18n="settings.highspeed.hint">有请求活跃时后台替每个账号抽加速卡，抽中后回复更快；空闲五分钟自动停。</p>
+                        <p class="hint-details__more" data-i18n="settings.highspeed.hint.detail">约每秒一次心跳请求；抽中后该账号的请求改走上游加速通道；空闲约五分钟后自动停。</p>
+                      </details>
+                    </div>
+                    <div class="field-cell field-cell--inline">
+                      <label class="field-cell__label" for="settings-mcp" data-i18n="settings.mcp">MCP 聚合</label>
+                      <label class="switch">
+                        <input class="switch__input" id="settings-mcp" type="checkbox" data-role="settings-mcp" />
+                      </label>
+                      <details class="hint-details hint-details--icon">
+                        <summary data-i18n-attr="title:settings.mcp.hint,aria-label:settings.mcp.hint"></summary>
+                        <p class="hint-details__more" data-i18n="settings.mcp.hint">把官方插件的工具聚合成一个 /mcp 端点，客户端接一次就拿到全部。</p>
+                        <p class="hint-details__more" data-i18n="settings.mcp.hint.detail">覆盖官方插件市场全部插件（天眼查 / Wind / 同花顺 iFinD 等）；工具名 {插件}__{工具}；调用会消耗账号的付费数据额度。</p>
+                      </details>
+                    </div>
+                    <div class="field-cell field-cell--inline">
+                      <label class="field-cell__label" for="settings-async" data-i18n="settings.async">闲时通道</label>
+                      <label class="switch">
+                        <input class="switch__input" id="settings-async" type="checkbox" data-role="settings-async" />
+                      </label>
+                      <details class="hint-details hint-details--icon">
+                        <summary data-i18n-attr="title:settings.async.hint,aria-label:settings.async.hint"></summary>
+                        <p class="hint-details__more" data-i18n="settings.async.hint">/async/v1/* 走上游闲时任务队列，不消耗套餐额度，适合后台批处理。</p>
+                        <p class="hint-details__more" data-i18n="settings.async.hint.detail">等上游算力空闲才执行；排队可能很长。</p>
+                      </details>
+                    </div>
+                    <div class="field-cell field-cell--inline">
+                      <label class="field-cell__label" for="settings-claim" data-i18n="settings.claim">自动抢套餐</label>
+                      <label class="switch">
+                        <input class="switch__input" id="settings-claim" type="checkbox" data-role="settings-claim" />
+                      </label>
+                      <details class="hint-details hint-details--icon">
+                        <summary data-i18n-attr="title:settings.claim.hint,aria-label:settings.claim.hint"></summary>
+                        <p class="hint-details__more" data-i18n="settings.claim.hint">每个账号定期查可领的限量套餐，开放即自动领取。</p>
+                        <p class="hint-details__more" data-i18n="settings.claim.hint.detail">限量套餐来自周末 / 体验活动；抢到的额度归账号；需要登录凭据，可能要过验证码。</p>
+                      </details>
+                    </div>
+                    <!-- 自动抢套餐的节奏与当前活动是运行时状态，按状态载荷只读展示；
+                         清单在进设置页与顶栏刷新时各拉一次（billing 面限频）。 -->
+                    <div class="field-cell field-cell--span claim-overview">
+                      <span class="field-cell__label" data-i18n="settings.claim.policy">排序策略</span>
+                      <span class="hint" data-role="settings-claimPolicy" data-i18n="settings.claim.policy.none">—</span>
+                      <div class="claim-overview__cadence" data-role="settings-claimCadence"></div>
+                      <div class="claim-overview__head">
+                        <span class="field-cell__label" data-i18n="settings.claim.activities">当前活动</span>
+                        <button type="button" class="btn" data-action="settings-claim-refresh" data-role="settings-claimRefresh" data-i18n="settings.claim.activities.refresh">刷新活动</button>
+                      </div>
+                      <ul class="claim-overview__activities" data-role="settings-claimActivities"></ul>
+                      <p class="hint" data-role="settings-claimActivitiesStatus" data-i18n="settings.claim.activities.loading">正在读取活动清单…</p>
+                    </div>
+                    <!-- 请求上下文记录：dump 开关。开关与路径都经热重载
+                         即时生效（`writeSettings` 更新 dump 快照），风险文案照搬那份说明的原文。
+                         路径展示的是配置值（空 = 默认位置）。 -->
+                    <div class="field-cell field-cell--inline">
+                      <label class="field-cell__label" for="settings-dump-enabled" data-i18n="settings.dump">请求上下文记录</label>
+                      <label class="switch">
+                        <input class="switch__input" id="settings-dump-enabled" type="checkbox" data-role="settings-dumpEnabled" />
+                      </label>
+                      <p class="hint hint--clip">
+                        <span data-i18n="settings.dump.path">文件</span>：<span class="mono" data-role="settings-dumpPath">—</span>
+                      </p>
+                      <details class="hint-details hint-details--icon">
+                        <summary data-i18n-attr="title:settings.dump.hint,aria-label:settings.dump.hint"></summary>
+                        <p class="hint-details__more" data-i18n="settings.dump.hint">记录每次请求的完整上下文（含请求/响应体）到调试文件。保存后立即生效。</p>
+                        <p class="hint-details__more" data-i18n="settings.dump.risk">dump 文件含完整请求体，可能包含提示词内容。只在排障时开启。</p>
+                      </details>
+                    </div>
+                    <div class="field-cell">
+                      <label class="field-cell__label" for="settings-quota-poll" data-i18n="settings.quotaPollSeconds">额度轮询（秒）</label>
+                      <input class="field field--num" id="settings-quota-poll" type="number" min="1" step="60" data-role="settings-quotaPollSeconds" />
+                      <details class="hint-details hint-details--icon">
+                        <summary data-i18n-attr="title:settings.quotaPollSeconds.hint,aria-label:settings.quotaPollSeconds.hint"></summary>
+                        <p class="hint-details__more" data-i18n="settings.quotaPollSeconds.hint">每隔这么多秒采样一次各账号的额度用量，供额度耗尽判定与恢复使用；空闲账号自动跳过。</p>
+                      </details>
+                    </div>
+                    <div class="field-cell">
+                      <!-- 常驻说明之四：这个比例决定账号什么时候被停，改的那一刻就要看见。
+                           两个取值示例（1 / 0.9）收进 title。 -->
+                      <label class="field-cell__label" for="settings-quota-threshold" data-i18n="settings.quotaDrainThreshold">额度耗尽阈值</label>
+                      <input class="field field--num" id="settings-quota-threshold" type="number" min="0.01" step="0.05" data-role="settings-quotaDrainThreshold" />
+                      <p class="hint" data-i18n="settings.quotaDrainThreshold.hint" data-i18n-attr="title:settings.quotaDrainThreshold.hint.detail">账号额度用到这个比例就标记「额度耗尽」，暂停调度直到额度重置。</p>
+                    </div>
+                  </div>
+                </section>
+
+                <!-- 身份：归一开关只读（由环境变量控制）；客户端版本可编辑，
+                     留空 = 自动探测本机安装的官方客户端。设备指纹不在这里：它是账号
+                     属性（一账号一指纹，R1），在账号详情里核对。 -->
+                <section class="group" data-group="identity">
+                  <h2 class="group__title"><svg class="group__icon" aria-hidden="true" focusable="false"><use href="#icon-circle-user-round" /></svg><span data-i18n="settings.group.identity">身份</span></h2>
+                  <div class="group__body field-grid">
+                    <!-- 这一格用上下排而不是行内排：控件是一对
+                         宽盒子（值 + 「只读」徽章，共 ~139px），1fr 的标签列在英文下只剩
+                         9px——「Identity normalization」直接压到控件上。控件不是
+                         「行内小件」时用上下排（标签吃满格子，一行放得下）。 -->
+                    <div class="field-cell">
+                      <span class="field-cell__label" data-i18n="settings.normalizeClientSystem">身份归一</span>
+                      <!-- 只读字段：当前值用 `.tag` 表达（开 / 关），
+                           StatusBadge 标注「这个字段不是控件」的原因。 -->
+                      <span class="row">
+                        <span class="tag" data-role="settings-normalize">—</span>
+                        <span class="status-badge" data-i18n="settings.badge.readonly">只读</span>
+                      </span>
+                      <!-- 常驻说明之三：它决定代理会不会被上游判伪造，只读也要看清。 -->
+                      <p class="hint" data-i18n="settings.normalizeClientSystem.hint">把请求里「You are Claude」一类的身份句改写成 ZCode，避免上游判伪造。只读：当前由环境变量控制。</p>
+                    </div>
+                    <div class="field-cell">
+                      <label class="field-cell__label" for="settings-app-version" data-i18n="settings.appVersion">客户端版本</label>
+                      <span class="row">
+                        <input
+                          class="field"
+                          id="settings-app-version"
+                          type="text"
+                          autocomplete="off"
+                          data-role="settings-appVersion"
+                          data-i18n-attr="placeholder:settings.appVersion.placeholder"
+                        />
+                        <button
+                          type="button"
+                          class="btn"
+                          data-action="settings-detect-app-version"
+                          data-i18n="settings.appVersion.sync"
+                        >
+                          从系统同步
+                        </button>
+                      </span>
+                      <!-- 来源路径可能很长（/Applications/ZCode.app/Contents/…）：显示时按
+                           控件宽度截断，完整值由 `app-view-settings.js` 写进 title。 -->
+                      <p class="hint mono hint--clip" data-role="settings-appVersionSource">—</p>
+                      <details class="hint-details hint-details--icon">
+                        <summary data-i18n-attr="title:settings.appVersion.hint,aria-label:settings.appVersion.hint"></summary>
+                        <p class="hint-details__more" data-i18n="settings.appVersion.hint">只有本机确实装了那个版本时，手填才安全：上游没见过的新版本号比旧版本更可疑。</p>
+                      </details>
+                    </div>
+                  </div>
+                </section>
+              </div>
+            </section>
+
+            <!-- 页脚：系统操作。
+                 版本 + 检查更新本来是一个字段格里合并的两件事——它们是同一个特性的
+                 两头（当前是哪个版本、要不要去问一下新的）；拆成两格时服务组占四行、
+                 最后一行只剩「退出进程」一个格（半行空白）。现在两者都在页脚的一行里：
+                 版本号是等宽的一长串，与按钮挤在同一格仍会折成两行，所以这一行允许
+                 弯折（1600×1000 实测合并省 39（中）/ 68（英）px）。
+                 版本值走 `.group__readonly`（等宽字），与可编辑控件区分；版本由
+                 `/api/system` 写，命令结果仍挂在「账户」组的两条横幅上。
+                 「退出进程」是唯一能动这个进程生死的入口：面板不提供启停代理，
+                 因为它跟代理共用一个监听，关掉代理等于把自己也关掉。 -->
+            <footer class="settings-footer">
+              <div class="settings-footer__group">
+                <span class="settings-footer__label" data-i18n="settings.about.version">版本</span>
+                <span class="group__readonly settings-footer__value" data-role="about-version">—</span>
+                <button
+                  type="button"
+                  class="btn"
+                  data-action="account-check-update"
+                  data-i18n="system.checkUpdate"
+                  data-i18n-attr="title:settings.about.checkUpdate.hint"
+                >
+                  检查更新
+                </button>
+              </div>
+              <div class="settings-footer__group settings-footer__group--end">
+                <span class="settings-footer__label" data-i18n="settings.shutdown">退出进程</span>
+                <button
+                  type="button"
+                  class="btn btn--danger"
+                  data-action="system-shutdown"
+                  data-i18n="settings.shutdown.action"
+                  data-i18n-attr="title:settings.shutdown.hint"
+                >
+                  退出
+                </button>
+              </div>
+            </footer>
+
+            <!-- 外观（主题 / 语言）在顶栏右侧：它们是随时可能切的
+                 本机偏好，顶栏全局可见才是它们的位置；设置页不留重复的
+                 触发点。逻辑在 `app-theme.js` 与 `app-i18n.js`，绑定在
+                 `app.js` 的 bindPrefsControls。 -->
+            </div>
+          </div>

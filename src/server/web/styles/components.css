@@ -1,0 +1,2386 @@
+/* ------------------------------------------------------------------------- */
+/* 降级顺序列表（order 的上移 / 下移）                                        */
+/* ------------------------------------------------------------------------- */
+
+.order-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/*
+ * 二选一的来源列表（添加账号模态的「导入凭据」）。
+ *
+ * 为什么不用 `.switch`（开关）：开关表达“开 / 关”，这里选的是两条互斥的路；
+ * 为什么不用原生 `<select>`：两个选项各自带一句说明，折叠进下拉就看不到“推荐”
+ * 在哪一边。一个选项 = 一行 radio + 主讲 + 说明，整行可点（radio 包在 `<label>` 里）。
+ */
+.choice-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.choice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.choice:hover {
+  background: var(--panel-alt);
+}
+
+/* 选中态只看 radio 自己（`:has` 给整行一层强调，与折叠区同一条口子）。 */
+.choice:has(.choice__input:checked) {
+  border-color: var(--accent);
+}
+
+.choice__input {
+  flex: 0 0 auto;
+  /* 与首行文字基线对齐：`min-height` 取控制高度，把圆点压在首行中间。 */
+  margin: 0;
+  accent-color: var(--accent);
+  width: var(--layout-icon);
+  height: var(--layout-icon);
+}
+
+.choice__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.choice__title {
+  color: var(--text);
+}
+
+.choice__hint {
+  color: var(--muted);
+  font-size: var(--text-micro);
+  line-height: 1.4;
+}
+
+.order-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  /*
+   * 横向的组内 8px、与框体 12px 之外，纵向也要留白：32px 的按钮在 min-height 32px
+   * 的行里上下各剩 1px，贴着行框，这就是「实测仍挤」的来源。4px 纵向内边距让
+   * 按钮组在行内呼吸（36px 的按钮 + 4px×2 + 2px 边框 = 46px 行高；原 32px 口径下
+   * 是 42px），横向口径不变。同一行的账号源列表（添加账号模态）共用。
+   */
+  padding: var(--space-1) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  font-size: var(--text-meta);
+  color: var(--text);
+}
+
+.order-item__index {
+  min-width: var(--space-4);
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 名字随内容收缩（不 flex:1 撑开），徽章贴着路由名，「序号 + 路由名 +
+   徽章」成一组；按钮组用 margin-left:auto 单独靠右。 */
+.order-item__name {
+  flex: 0 1 auto;
+  font-family: var(--font-mono);
+}
+
+/* 行内按钮组。组内间距 8px（--space-2），整体推到行尾；两字按钮不吃
+   `.btn` 的 64px 最小宽（紧凑排布），高度仍是统一的 --control-height。 */
+.order-item__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.order-item__actions .btn {
+  min-width: 0;
+}
+
+/*
+ * 扫描结果的堆叠行（添加账号 → 导入凭据 → 服务端文件）：路径在上、徽章与
+ * 「使用」在下。
+ *
+ * `.order-item` 的基础是横排（名字 + 徽章 + 按钮一行）；一整条文件路径放进去会
+ * 把行顶宽，卡片冲出它所在字段格的右边界（截图里卡片比上方输入框宽出一截）。
+ * 堆叠态改成 column：路径独占第一行、动作组在第二行靠右。
+ *
+ * 两条覆盖都必须写在 `.order-item` 之后：`flex-direction` / `align-items` 与
+ * 基础规则同优先级，源序决定胜负（写在 base.css 里会被这里的 `align-items:
+ * center` 盖回去，实测动作组缩在卡片中段、不贴右缘）。
+ *
+ * 动作组的 `margin-left: auto` 在 column 下会把整组推出右边界，改回 0；
+ * 靠 `align-items: stretch` + `justify-content: flex-end` 贴右。
+ *
+ * 路径自己裁切（一行 + 省略号，完整值在 `title` 上）：长路径不许再把卡片撑宽。
+ */
+.order-item--stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-2);
+}
+
+.order-item--stack .order-item__name {
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.order-item--stack .order-item__actions {
+  margin-left: 0;
+  justify-content: flex-end;
+}
+
+/* ------------------------------------------------------------------------- */
+/* 字段格 / 说明文字（全项目唯一字段骨架）                                     */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * 一个字段 = 标签（上）+ 控件（吃满格）+ 可选说明（控件下）。全项目只有这一种
+ * 骨架：设置页的分组、路由策略页的折叠区、日志与聊天的筛选器、每个弹窗的表单
+ * 都是 `.field-grid > .field-cell`。
+ *
+ * 为什么是「标签在上」而不是「标签列在左」：标签列要定宽，定宽就要按最长标签
+ * 挑一个值，挑宽了控件被挤、挑窄了标签折行。标签在上之后不需要那个值——同一列
+ * 的控件左边缘天然是一条竖线，两列之间只剩列距。
+ *
+ * `min-width: 0`：长路径 / 长 id 自己缩，不顶破格子。
+ */
+.field-cell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+/*
+ * 组内两列：`minmax(0, 1fr)` 的下界必须是 0，否则一行长内容会把整列撑到内容宽、
+ * 把列距挤没（设置页之外的四各视图直接复用这一条）。
+ *
+ * 列距 `--space-4`：与字段之间的纵向间距没有关系（纵向是各容器的 gap），这里是
+ * 「两列之间」的距离，钉在 16px。
+ */
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: var(--space-4);
+}
+
+@media (max-width: 720px) {
+  .field-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 整行字段（开关行、说明行、动作行）：跨两列。 */
+.field-cell--span {
+  grid-column: 1 / -1;
+}
+
+/* 组内横幅（账户组的改密码结果）：它们说的是整组，不分列 */
+.field-grid > .banner {
+  grid-column: 1 / -1;
+}
+
+/* 标签行：14px / 正文色，与控件同一格宽；徽章（需重启 / 只读）跟在标签后面 */
+.field-cell__label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--text);
+  font-size: var(--text-meta);
+  line-height: var(--leading);
+  /* 标签在 157px 的格子里要能折行，长单词（英文标签 / 型号名）
+     也不许顶到右边的控件上——不给断词点的话，它会溢出自己的列、压在控件上。 */
+  overflow-wrap: anywhere;
+}
+
+/*
+ * 行内小件：控件是开关 / 按钮 / 链接 / 只读值时，标签与控件同一行。
+ *
+ * 依据是控件的最小宽度：这些控件本身不超过一两个词的宽度，让它们独占一行只会
+ * 在标签与控件之间白留一整个字段行（36px）。吃宽度的输入框 / 下拉 / 列表
+ * 则用上下排（`.field-cell` 本身）。
+ *
+ * 说明行（`.hint-details` / `.hint`）跨两列落到下面：它们说的是整个字段，不是
+ * 控件旁边的一句话。
+ */
+.field-cell--inline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--space-2);
+  row-gap: var(--space-1);
+  /* 与单行字段（36px 控件）同高：一行里有没有说明，标签的基线都不动 */
+  min-height: var(--control-height);
+}
+
+.field-cell--inline > .hint-details,
+.field-cell--inline > .hint {
+  grid-column: 1 / -1;
+}
+
+/* `.switch` 自带 `align-self: flex-start`（为空的是 flex 行），在格子里靠右居中 */
+.field-cell--inline > .switch {
+  align-self: center;
+  justify-self: end;
+}
+
+/* 控件吃满字段格：`.field` 的自然宽度按 20ch 算，在 130–200px 的窄格里会顶破行 */
+.field-cell > .field,
+.field-cell > .select,
+.field-cell > .row > .field {
+  min-width: 0;
+  width: 100%;
+}
+
+/*
+ * 数值框：与文本框同一套左对齐 + 等宽数字，但**不吃满格子**——数值由值域决定宽度
+ * （3–5 位），拉满一列只会让数字左边一大片空。10ch 是 8–10ch 档的中间值；宽度是
+ * 几何值，同 `.menu__field .field--num` 的 4.5rem 先例（不受间距档约束）。
+ *
+ * 这条必须写在 `> .field` 那条之后：同优先级下后写的生效，反过来数值框会被
+ * `width: 100%` 盖回去。
+ */
+.field-cell > .field--num {
+  width: 10ch;
+}
+
+/* 「输入框 + 按钮」那一行（客户端版本）：按钮不被压扁（它不成弹性项），
+   行宽不够时整行折到第二行而不是把按钮文字压成三行 */
+.field-cell > .row {
+  flex-wrap: wrap;
+}
+
+.field-cell > .row > .btn {
+  flex: 0 0 auto;
+}
+
+/*
+ * 动作行（账户组的保存 / 退出）：跨整组宽，按钮组靠右（`justify-content:
+ * flex-end`）；上方留给一句说明。
+ *
+ * 说明固定占一整行（`flex: 1 1 100%`），按钮组因此永远落在第二行、
+ * 永远不被拆开。说明按内容宽、靠 `margin-right: auto` 排时，行为随格子宽漂：
+ * 1600px 下按钮被 auto 外边距挤到**左边**，1440px 下按钮跳到第一行右边、说明掉到
+ * 第二行，1280px 下两颗按钮又被拆成两行——同一组按钮在三种宽度上三个落点。
+ */
+.field-cell.field-actions {
+  grid-column: 1 / -1;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.field-cell.field-actions .hint {
+  flex: 1 1 100%;
+  /* hint 的 42ch 限宽在这一行要让位：`max-width` 会把弹性项的假设宽度钳回 344px，
+     第一颗按钮就能挤上同一行，第二颗被挤到第三行——按钮组又被拆开了。 */
+  max-width: 100%;
+}
+
+/*
+ * 字段说明的基准样式（后续设置批直接消费，不再另起类）。
+ *
+ *   - 位置：控件下方（`.field-cell` 的流内，与控件同列）；独立说明块就放
+ *     容器的末尾，与上一行的间距由容器的 gap 给。
+ *   - 字号：--text-micro（13px）——比正文低两档，不与标签（meta）争重。
+ *   - 颜色：--faint——第三层文字色，压三张面都过 AA（tokens.css 注释）。
+ *   - 限宽：42ch，长说明折行而不是横跨整卡。
+ *   - 后果型提示（需重启、有风险）不改这个类：那些用 `.confirm__warn` 色
+ *     或行内 `data-reload` 徽章，不混进普通说明。
+ */
+.hint {
+  /* 说明文字限宽：13px 字号下一行超过 46 个字符就会横跨整行，视线回不到控件 */
+  max-width: 42ch;
+  /* 写成 `<p>` 时清掉浏览器默认的上下外边距：行距由容器的 `gap` 给，两者叠加会把
+     字段行拉成两倍高 */
+  margin: 0;
+  color: var(--faint);
+  font-size: var(--text-micro);
+}
+
+/* 多行文本（JWT 粘贴框）：高度自适应，字号 / 圆角 / 边框沿用 `.field` */
+.field--area {
+  height: auto;
+  min-height: calc(var(--control-height) * 3);
+  padding: var(--space-3);
+  resize: vertical;
+}
+
+.field--num {
+  /* 数值框与文本框统一左对齐：两列布局里「下拉（左）+ 数字（右）」
+     同行混排时基线不齐，用户实测反馈「有的居左有的居右」。tabular-nums 保留
+     （等宽数字仍然对齐），放弃的只是右对齐的「个位对齐」收益——本项目字段值
+     都很短（3-5 位），收益小于混排的代价。 */
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * 数值输入框隐藏 spinner。
+ *
+ * 浏览器自带的上下箭头占掉 12px 左右宽度，与 36px 的字段行不对齐，深色主题里也
+ * 不跟随 token 上色；数字仍然可以键盘上下调。
+ */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* 额度条：宽度由内联 `width` 给（纯几何值，不受间距档约束），颜色来自 token */
+.meter {
+  display: block;
+  height: var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--panel-alt);
+  overflow: hidden;
+}
+
+/* fill 是 span：inline 元素不吃 width/height，必须自己升成块级。
+   （靠父级 inline-flex 把它 flex item 化才生效，块状卡片的
+   横排容器里没有那个上下文。）*/
+.meter__fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+/*
+ * 剩余额度的三档语义色（按红绿徒章纪律）：
+ *   剩余 > 50% → 绿（--ok）
+ *   20-50%     → 琥珀（--warn）
+ *   < 20%      → 红（--danger）
+ *
+ * 琥珀在这里是**过程态例外**（已登记到 AGENTS.md 的容器规范）：健康徽章是二值化的
+ * （只有绿 / 红），额度条却必须是三档——“还剩一半”与“快用完了”对用户的行动决策
+ * 不同，而健康徒章回答的是“现在能不能发请求”（能 / 不能）。例外只给额度条与额度
+ * 百分比文字，不回到状态徒章（status-badge）与告警横幅上；新增第四条色阶要先回
+ * AGENTS.md 登记。
+ */
+.meter__fill--ok {
+  background: var(--ok);
+}
+
+.meter__fill--warn {
+  background: var(--warn);
+}
+
+.meter__fill--danger {
+  background: var(--danger);
+}
+
+/* 额度百分比文字的同三档色（与 progress 条同一判据，两处不各自算一遍）。 */
+.quota-pct--ok {
+  color: var(--ok);
+}
+
+.quota-pct--warn {
+  color: var(--warn);
+}
+
+.quota-pct--danger {
+  color: var(--danger);
+}
+
+/*
+ * 账号详情：大窗里的四段——套餐卡 / 本期活动 / 抢活动 / 路由健康。
+ * 整块不铺 `--panel-alt` 底色：大窗本身就是浮层（框体不套框体），
+ * 浮层里再铺一层色块，套餐卡的边界就看不出来了。行内条目（抢活动状态行 /
+ * 逐路由健康）是「标签 + 徽章 + 说明」，窄了就换行。
+ */
+.detail__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  background: var(--panel-alt);
+  color: var(--muted);
+  font-size: var(--text-micro);
+}
+
+/* 一段（段标题 + 段体）：只隔 `--space-2`，段的间距由 `.modal__body` 的 gap 给。 */
+
+/* 账号详情里的一句解释（JWT-only 账号为什么只能跑 start-plan）。
+   独占一行，warn 系但不刺眼：它是限制说明，不是错误（语义色不混用）。 */
+.detail__note {
+  color: var(--warn);
+  font-size: var(--text-micro);
+}
+
+/* 同一句解释的中性版：套餐空态说明（不画空卡）。它不是限制也不是
+   错误，faint 就够，warn 只留给 JWT-only 那条真的缺材料的提示。 */
+.detail__note--quiet {
+  color: var(--faint);
+}
+
+.detail__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+/* 段标题行（段名 + 右侧补充）：右侧的 `.detail__section-note` / 按钮靠回行尾。 */
+.detail__section-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-bottom: var(--space-1);
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font-weight: var(--weight-strong);
+}
+
+/* 标题右侧的补充信息（可用量 / 活动标签）：弱一层，不与段名争重。 */
+.detail__section-note {
+  margin-left: auto;
+  color: var(--faint);
+  font-weight: var(--weight-regular);
+}
+
+/*
+ * 活动 / 可领套餐 / 抢活动每个条目一行卡：领活动与活动
+ * 列表按「名 + 标签一行，说明逐行」排，与套餐卡的块状结构分开——这两段是动作
+ * 队列，不是额度快照。
+ */
+.detail__plan {
+  margin-bottom: var(--space-2);
+}
+
+.detail__plan:last-child {
+  margin-bottom: 0;
+}
+
+.detail__plan-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.detail__plan-name {
+  color: var(--text);
+  font-weight: var(--weight-strong);
+}
+
+.detail__plan-line {
+  color: var(--muted);
+}
+
+/* 领取动作行（「立即抢」）。按钮不拉伸全宽（它是行内的小动作，不是
+   表单提交），左对齐在权益行下面。 */
+.detail__plan-actions {
+  margin-top: var(--space-1);
+}
+.detail__plan-actions .btn {
+  min-width: 0;
+}
+
+/*
+ * 套餐卡：一张卡 = 一个 plan（plan_id 分组，卡片
+ * 名 = 套餐实例的 name）或者 coding 平面的一组用量窗口。卡体：模型桶行（一行一
+ * 桶，名 = show_name / 条 / 数值 / 重置）；窗口卡仍是四格窗口行。
+ *
+ * 双列 Grid：大窗 920px 扣掉两边 16px 内边距与 12px 列距，每列 432px——刚好放
+ * 得下行内四格。≤900px 退单列（与 `.modal--lg` 的全屏断点同一个值）。
+ * 宽档不新造：1200 以下的窗就两列，再窄就一列。
+ */
+/* 套餐卡网格：一卡一套餐，双列；窄屏单列。 */
+.plan-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+/*
+ * 体系分区：同一账号可同时持有体验套餐（Start Plan）与编程套餐
+ * （Coding Plan），两类卡并存时套餐段分两区、各带小标题（官方词
+ * 「体验套餐」/「编程套餐」）；单体系时退回 `.plan-cards` 平铺——不画小标题、
+ * 不加 DOM 层级（保持既有视觉）。小标题是段内最弱的标题层（muted/micro/strong）：
+ * 比段标题（`detail__section-title`，text/默认字号 + 底线）弱一档，比说明行重一档。
+ */
+.plan-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.plan-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.plan-group__title {
+  color: var(--muted);
+  font-size: var(--text-micro);
+  font-weight: var(--weight-strong);
+}
+
+.plan-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+}
+
+/* 卡头：类型 + 套餐名一行，右侧时间 meta + 状态词。名字可能很长（上游套餐名），
+   所以名字吃剩余宽度并截断，右侧两项永不被挤掉。 */
+.plan-card__head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+}
+
+.plan-card__name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-weight: var(--weight-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 卡头右侧（到期 / 生效时间）：弱一层，紧跟名字之后（不靠 margin-left:auto：卡窄时
+   它会掉到下一行左端，与名字同行时才对得上）。 */
+.plan-card__meta {
+  margin-left: auto;
+  color: var(--faint);
+  font-size: var(--text-micro);
+  white-space: nowrap;
+}
+
+/*
+ * 模型桶行：一行一桶，四格——名（show_name）/ 条（= 剩余占比）/
+ * 数值（剩 X/总量 Y，分子点名）/ 重置（period 刷新周期文案 +
+ * expires_at）。列宽全部可压缩（minmax）：窄列时截断在格内，一行永不折断。
+ */
+.plan-card__buckets {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.plan-card__bucket {
+  display: grid;
+  grid-template-columns: minmax(56px, 1.15fr) minmax(28px, 0.42fr) minmax(0, 1.35fr) minmax(0, 1.25fr);
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-micro);
+}
+
+.plan-card__bucket-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-card__bucket .meter {
+  min-width: 0;
+}
+
+.plan-card__bucket-amount {
+  min-width: 0;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.plan-card__bucket-reset {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--faint);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 过期桶行：灰一层、不画条（余量已经不归它了），数值如实留着。 */
+.plan-card__bucket--expired {
+  color: var(--faint);
+}
+
+/*
+ * 用量窗口行（5 小时剩余 / 每周剩余 / 工具调用 / 未知 type）：四格 Grid——
+ * 名（自适应）/ 百分比（定宽）/ 条（自适应）/ 重置（定宽）。列宽用 minmax 与
+ * 固定档位，不写裸宽：名与条两侧都能压缩，另两列不会因数字变化而抖动。
+ */
+.plan-card__windows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.plan-card__window {
+  display: grid;
+  grid-template-columns: minmax(80px, 1fr) 40px minmax(60px, 96px) minmax(64px, auto);
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-micro);
+}
+
+.plan-card__window-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-card__window-pct {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.plan-card__window-reset {
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* 订阅产品信息行：产品形态 / 续期 / 到期 / 计费周期与窗口行同一档密度，
+ * 允许换行（产品字段可多可少），每项不跨卡。窗口行仍是下面那几格，结构不改动。 */
+.plan-card__subscription {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-micro);
+}
+
+.plan-card__subscription-line {
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 过期卡：整卡灰化（muted → faint）+ 「已过期」中性小标，不用红——过期不是健康
+ * 态（二值化）。过期桶不计入任何可用合计，卡上只如实列出它
+ * 当初的额度。 */
+.plan-card--expired {
+  color: var(--faint);
+}
+
+.plan-card--expired .plan-card__name,
+.plan-card--expired .plan-card__bucket-amount {
+  color: var(--faint);
+}
+
+/*
+ * 账号表格的额度列（行内一级披露）：按套餐类型分行，每行 = 短标签 +
+ * 剩余/总量（或百分比）+ 60-80px 迷你条。整格可点开详情大窗（行本也开），
+ * 所以它是“看得出一眼额度”的一级披露，不是另一层按钮堆。
+ */
+.quota-cell {
+  /* 单元格本身是一个 button（键盘入口，见 app-view-accounts.js），所以先把 UA
+     的按钮外观抹干净：无边框 / 无底色 / 继承字体 / 吃满单元格宽。列内容居中
+     由 `align-items: center` 与 `text-align: center` 一起给——只写 `text-align`
+     的话 flex 行本身不会跟着居中。 */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  text-align: center;
+}
+
+.quota-cell--open {
+  cursor: pointer;
+}
+
+.quota-cell__line {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.quota-cell__kind {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--text-micro);
+}
+
+.quota-cell__amount {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 迷你额度条：宽度是一段几何值（进度条几何不受间距档约束），不抢文本宽度。
+ * 48px：额度列是「标签 → 条 → 数值」，条不再需要跟数字
+ * 抢地方，两行的条起点对齐成一条竖线更好读。 */
+.quota-cell__line .meter {
+  flex: 0 0 auto;
+  width: 48px;
+}
+
+/*
+ * 账号表的纵向文字列。
+ *
+ * 「类型 · 路由」排成一行 `coding-plan · start-plan` 时，两个短词把列撑到 ~200px；
+ * 类型标签一行、每条路由一行之后，列宽回到 ~110px，省下的地方给额度列。这里只能用
+ * 内层 `div`：`<td>` 自己不能 `display: flex`（会让它从表格布局里掉出来）。
+ *
+ * 全项目表格契约的落点之一：单元格文本居中管不到 flex 盒子，塔里的每一行要靠
+ * `align-items: center` 才真的落在列中线（`.matrix__type` 也归这条，不再单写）。
+ */
+.cell-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.cell-stack__route {
+  white-space: nowrap;
+  font-size: var(--text-micro);
+  line-height: 1.2;
+}
+
+/* 账号列只有备注名（ID 前缀在 `title` 里）：单行不换行，长名截断。*/
+.cell-account__label {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+
+.quota-cell__more {
+  color: var(--faint);
+  font-size: var(--text-micro);
+}
+
+/* 行的额度列不右对齐（两行的标签 + 数字左对齐才读成两行条），其余数值列
+   仍走 `.num` 的等宽数字（tabular-nums）。 */
+.quota-cell--empty {
+  color: var(--faint);
+}
+
+/*
+ * 窄屏（≤900px）：大窗已退成全屏，双列套餐卡在这个宽度下每列不足 400px（窗口行
+ * 的四格会被压到换行），所以与 `.modal--lg` 的全屏断点同值退单列。
+ */
+@media (max-width: 900px) {
+  .plan-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/*
+ * 行内操作组（账号 / keys / 代理三张表的操作列共用）：按钮之间不撑满单元格。
+ * 组内 8px（规范基线「按钮组内 8px」）：4px 是 --space-1 档，启停开关与归零 / 删除会贴
+ * 在一起。
+ *
+ * 组内三件高度统一到 28px（`.btn--sm`）——不同高度的控件同一行靠
+ * `align-items: center` 居中对齐时，眼神看到的基线反而会错开一两个像素，这
+ * 正是「开关 22px 与两个 32px 按钮不齐」的来源。
+ *
+ * 这条是**表格行内控件的一律口径**——三张表的操作列都带
+ * `col-actions`（`--layout-actions-col`），组里只有 28px 的控件：`.btn--sm`（keys /
+ * 代理）、`.tag--toggle`（keys 的启停）、`.btn--menu`（账号的 ⋯，尺寸由 `.table` 的
+ * 行内控件规则给）。
+ *
+ * `justify-content: center` 是全项目表格契约的落点之一：单元格的 `text-align`
+ * 管不到 flex 组，操作列的三个按钮要整组落在列中线，得靠盒子级居中。
+ */
+.cell-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  flex-wrap: nowrap;
+}
+
+/* ------------------------------------------------------------------------- */
+/* 按钮 / 字段 / 标签                                                         */
+/* ------------------------------------------------------------------------- */
+
+/* 按钮：36px / meta / sm / 0 16px / 1px line-strong
+ * （横向内边距用 `--space-4`：14px 不在间距档里，取最近的现有档位；
+ *  36px 高度与 16px 横向内边距是 GitHub / VS Code 那一档的惯常配比。） */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--layout-btn-min);
+  height: var(--control-height);
+  padding: 0 var(--space-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-meta);
+  line-height: var(--leading);
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: var(--panel-alt);
+}
+
+.btn:disabled {
+  border-color: var(--line);
+  color: var(--faint);
+  cursor: not-allowed;
+}
+
+.btn:disabled:hover {
+  background: var(--panel);
+}
+
+/*
+ * 行内控件档（`--control-height-sm` = 28px）：表格行里与文字同排的小号
+ * 按钮。
+ *
+ * 两个刻意的例外：`min-width` 归零（`.btn` 的 64px 是给页面级按钮的——两个字
+ * 的「归零」被 64px 拉成一个空盒子，正是「短词显得笨重」的来源）；横向内边距
+ * 取 `--space-2`（8px）而不是 10px——项目不允许第七个间距值，
+ * 8px 同时让三件套（52 + 44 + 44 + 16）装进 160px 的操作列。
+ *
+ * 窄屏媒体查询里的 `.btn { height: var(--layout-touch-min) }`（44px）写在后面、
+ * 同特异性，会盖掉这里的 28px，手机的触摸目标不受影响。
+ */
+.btn--sm {
+  min-width: 0;
+  height: var(--control-height-sm);
+  padding: 0 var(--space-2);
+}
+
+/* 主按钮：主题色；文字色走 `--on-accent`。hover
+   落到深一档的 `--accent-strong`：加深是「按下」的方向感，浅蓝底上压白字
+   读不清。 */
+.btn--primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.btn--primary:hover {
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+}
+
+.btn--primary:disabled,
+.btn--primary:disabled:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--faint);
+}
+
+/*
+ * 危险操作按钮（删除 / 强制中断）：danger 系（失败 / 已禁用那一档语义色）。
+ * 容器配色与主按钮同构，所以前景色也用 `--on-accent`（实心色块上的前景，
+ * 它跟随主题翻转，所以这里不写死白色）。
+ */
+.btn--danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: var(--on-accent);
+}
+
+.btn--danger:hover {
+  border-color: var(--danger-border);
+  background: var(--danger-border);
+}
+
+/*
+ * 安静的危险按钮（表格行内删除）：只染文字与描边，hover 才铺一层浅红底。
+ *
+ * 与 `.btn--danger` 的分工：实心红底是「一屏只有一个、按下去不可回头」的动作
+ * （退出进程 / 退出登录）；表格行里的删除每行都有一个，实心红底会把整张表变成
+ * 告警墙。行内删除要的是「与旁边的「归零」一眼分得开」，不是吸收全局注意，所以
+ * 用 danger 文字色 + danger 描边，hover 时 danger-soft 底。
+ *
+ * 必须排在 `.btn:hover`（背景 --panel-alt）之后：同特异性（0,2,0），后来者胜。
+ */
+.btn--danger-quiet {
+  border-color: var(--danger-border);
+  background: var(--panel);
+  color: var(--danger);
+}
+
+.btn--danger-quiet:hover {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+/* 字段行：36px / meta / sm / 0 12px / 1px line
+ *
+ * 横向内边距 12px 是间距档的三倍：14px 字在
+ * 8px 边距里贴边，36px 的盒子需要更宽的呼吸位；纵向不用给——高度固定、
+ * 行高 21px 自动重心居中。 */
+.field {
+  height: var(--control-height);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-meta);
+  line-height: var(--leading);
+}
+
+.field::placeholder {
+  color: var(--placeholder);
+}
+
+/* 标签：22px / micro / sm / 0 12px / 1px line-strong
+ * （横向内边距 6px 不在间距档里，取最近的现有档位 `--space-3`）。
+ * 高度、字号、横向内边距三者一起走一档（22 / 13 / 12），
+ * 胶囊的“胖度”才不变。 */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  height: var(--tag-height);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: var(--text-micro);
+  white-space: nowrap;
+}
+
+.tag--ok {
+  border-color: var(--ok-border);
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.tag--danger {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.tag--accent {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/*
+ * 可点的状态徽章（keys 页操作列）：tag 的皮、按钮的骨。
+ *
+ * 它是 `<button>`，所以要抹掉 UA 的字形与内边距（tag 自己已经给了内边距）；高度
+ * 拉到行内控件档（`--control-height-sm` 28px）而不是 tag 的 22px——它与旁边两个
+ * 28px 按钮是同一排的三个行内控件，盒子等高才没有“胶囊矮一截”的观感（22px 开关
+ * 与 32px 按钮基线不齐也是同一个问题）。hover 只把描边提亮成自己的
+ * 语义色（currentColor）——“能点”的提示不能靠换底色：tag--ok 的浅绿底换成
+ * `--panel-alt` 会把状态色一起换成中性灰，读者反而看不出当前是启用还是停用。
+ * 全面解释进 `title`。
+ */
+.tag--toggle {
+  height: var(--control-height-sm);
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.tag--toggle:hover {
+  border-color: currentColor;
+}
+
+/*
+ * StatusBadge：状态点 + 短文案的小徽章。
+ *
+ * 与 `.tag` 的分工：`.tag` 是列表 / 详情里的状态标签（soft 底三件套，语义色的
+ * 「面积」表达）；徽章用于**字段级的语义标注**（「需重启」「只读」这类挂在配置
+ * 行上的说明），规格要求不用大面积色块填充，所以只有 6px 圆点与文字色跟状态走，
+ * 底色永远是 `--panel`、边框永远是 `--line`。
+ *
+ * 语义分工：--ok / --danger 是健康语义的两端（绿 = ok/启用，红 = 需要处理的
+ * 故障：凭据失效 / 401 / drained / 冷却），--muted 是用户主动停用的中性档，
+ * --warn 从健康语义退役，只留给过程态与提醒（需重启、重连中这类「不是故障、
+ * 但要人知道」的状态）；--pending 同理（在飞未归）。
+ */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--tag-height);
+  /* 与 `.tag` 同内边距（12px），两种小薄片的宽度才可比 */
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: var(--text-micro);
+  white-space: nowrap;
+}
+
+.status-badge__dot {
+  width: var(--space-2);
+  height: var(--space-2);
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.status-badge--ok {
+  color: var(--ok);
+}
+
+.status-badge--ok .status-badge__dot {
+  background: var(--ok);
+}
+
+.status-badge--warn {
+  color: var(--warn);
+}
+
+.status-badge--warn .status-badge__dot {
+  background: var(--warn);
+}
+
+.status-badge--danger {
+  color: var(--danger);
+}
+
+.status-badge--danger .status-badge__dot {
+  background: var(--danger);
+}
+
+/*
+ * 「用户主动停用」变体：中性灰，不参与告警。
+ *
+ * 判据只有一条：红色只表示「系统出问题了，需要处理」；用户主动关掉的东西不是
+ * 故障。停用与故障同色时，扫视时分不清「我关的」和「出问题了」。灰档与
+ * `--aborted` 同色但语义独立（那是「客户端断开」，这是「账号被关」），改色时
+ * 互不牵连。
+ */
+.status-badge--muted {
+  color: var(--muted);
+}
+
+.status-badge--muted .status-badge__dot {
+  background: var(--muted);
+}
+
+.status-badge--accent {
+  color: var(--accent);
+}
+
+.status-badge--accent .status-badge__dot {
+  background: var(--accent);
+}
+
+/*
+ * 「进行中」变体：在飞请求还没有状态码，语义不是警告而是「还没回来」，
+ * 用 warn 的琥珀色表达等待，文案是 `…`。与 `--warn` 同色但语义分开：4xx 的橙
+ * 是「上游拒了」（结果严重度），这里的琥珀是「还在路上」（过程态），改色时互不
+ * 牵连。琥珀只剩过程态与提醒两用，健康语义不用它。
+ */
+.status-badge--pending {
+  color: var(--warn);
+}
+
+.status-badge--pending .status-badge__dot {
+  background: var(--warn);
+}
+
+/*
+ * 「客户端断开」变体：没有状态码、又不是上游错误的那种结束。
+ *
+ * 用 muted（中性）而不是 danger：客户端主动 abort 时上游那条 fetch 也会报错，记录
+ * 上看起来和「上游 5xx」一模一样，而这正是要分开的两件事（`clientAborted` 的字段
+ * 注释就是这么写的）。danger 只留给上游真的拒了。
+ */
+.status-badge--aborted {
+  color: var(--muted);
+}
+
+.status-badge--aborted .status-badge__dot {
+  background: transparent;
+  border: 1px solid var(--muted);
+}
+
+/* ------------------------------------------------------------------------- */
+/* 行尾菜单：⋯ 展开的下拉菜单，收纳表格行的低频操作                    */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * 菜单挂在单元格上（`.cell-menu` 是定位原点），向下展开。行随轮询整体重建，
+ * 开合状态不落在 DOM 上（重画即收起），由视图层的 document 委托开关——与
+ * CollapsibleSection 同一条纪律：委托绑定一次，行重画不需要重绑。
+ *
+ * 中心对齐跟着全项目表格契约走：`.cell-menu` 也是「流量占比」列（`.share__value`
+ * 的宿主）的类，两处都要落在列中线。这里不给 `.menu` 绝对定位的 left 补偏移——
+ * 浮层贴右边缘展开在窄列上更不容易被面板裁掉，只把触发键本身居中。
+ */
+.cell-menu {
+  position: relative;
+  text-align: center;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  /* 行内菜单的 `absolute` 版：层叠上下文是所在的单元格，跨单元格不需要更高的
+     层级，所以留在弹窗那一档（`--layer-popover` 只给 `.menu--fixed` 用）。*/
+  z-index: var(--layer-modal);
+  display: flex;
+  flex-direction: column;
+  min-width: 176px;
+  padding: var(--space-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: var(--shadow-panel);
+}
+
+/*
+ * 固定定位的菜单：坐标由 `app-view-accounts.js::placeMenu` 按触发按钮的
+ * rect 写成行内 `left` / `top`。
+ *
+ * 为什么不用 `.menu` 的 `absolute`：菜单在 `<td>` 里，表格容器是 `overflow: auto`，
+ * 最后一行（或贴近滚动边缘的行）的菜单会被容器直接裁掉——用户看到的是「⋯ 点了
+ * 没反应」。`fixed` 反过来只相对视口定位，跟**哪个容器在滚**无关。
+ *
+ * 必须把 `.menu` 的 `top` / `right` 覆盖掉：`right: 0` + 行内 `left` 同时生效会
+ * 把宽度拉成“从 left 到容器右边”，菜单会横着铺满一行。
+ */
+.menu--fixed {
+  position: fixed;
+  top: 0;
+  right: auto;
+  /* 盖过行头 sticky 层与表格自身的层叠上下文，否则滚到表头下面时被吃掉。*/
+  z-index: var(--layer-popover);
+}
+
+.menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--control-height);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-meta);
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu__item:hover {
+  background: var(--panel-alt);
+}
+
+/* 危险项只染文字色：hover 底色与普通项同款，不加一层红底。 */
+.menu__item--danger {
+  color: var(--danger);
+}
+
+/* 菜单里的字段行（权重）：标签弱一层，输入框收窄到三位数。 */
+.menu__field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-height);
+  padding: 0 var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-meta);
+}
+
+.menu__field .field--num {
+  flex: 0 1 auto;
+  width: 4.5rem;
+}
+
+/*
+ * 调度权重列：百分比是**按钮**（点开权重浮层），所以它长得像链接——
+ * 主题色 + 等宽数字，但没有下划线（下划线只留给 `<a>` 跳转）。命中区保持
+ * `--control-height`（36px）：密集表行高 45px，装得下，不该为了一行紧凑牺牲可点性。
+ *
+ * 数字在按钮盒内居中（全项目表格契约：单元格内容居中）。按钮自身的宽度仍按
+ * `min-width: 5ch` 撑，不拉满整格——拉满会让命中区横跨列宽，和旁边的 ⋯ 菜单挤在一起。
+ */
+.share__value {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 5ch;
+  height: var(--control-height);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: var(--text-meta);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.share__value:hover {
+  background: var(--panel-alt);
+}
+
+/*
+ * 占比浮层：复用 `.menu` 的外壳（定位 / 阴影 / 边线 / 圆角），只把最小
+ * 宽度调宽一档——它多了两行说明文字，176px 会折成四行。它仍是 disclosure
+ * 小浮层那一档宽度，不是模态。
+ */
+.share-pop {
+  min-width: 232px;
+}
+
+/* 浮层里的说明行（「实际占比 14.3%」与口径说明）：比正式字段弱一层。 */
+.menu__note {
+  padding: var(--space-1) var(--space-2);
+  color: var(--text);
+  font-size: var(--text-micro);
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+}
+
+/* 口径说明：辅助信息（13px / --faint / 限宽 26ch，与 .hint 同一套约定）。 */
+.menu__note--quiet {
+  max-width: 26ch;
+  color: var(--faint);
+}
+
+/* 方形图标按钮（⋯ 的宿主）：与 `.btn` 同高，宽度收成正方形。
+   `min-width: 0` 必须有：`.btn` 的 `--layout-btn-min`（64px）是页面级按钮的最小宽，
+   不给它让路时这个“方形”会变成 64×36 的胶囊（与 `.btn--icon` 同一个坑）；
+   `.table` 的行内控件规则再把它收成 28×28 的方盒。 */
+.btn--menu {
+  padding: 0;
+  min-width: 0;
+  width: var(--control-height);
+  font-size: var(--text-body);
+  letter-spacing: 1px;
+}
+
+/* ------------------------------------------------------------------------- */
+/* 表格（CompactTable：行高 45px / meta / 12px 等距 / 1px line）              */
+/* ------------------------------------------------------------------------- */
+
+/* 内容列里的组件各守自己的可读上限：指标卡列、字段格、图表、长表格、
+ * 请求表滚动框与聊天输入区在超宽屏下不拉成通栏。面板、卡片、表格容器、
+ * 页头、页脚与高级区仍吃满内容列；热力图格子缸与月轴共用同一份动态列
+ * 模板，相对面板继续撑满，不留空白。flow 视图出现纵向滚动条时正文的可读宽
+ * 少一个滚动条宽，页头动作与顶栏仍在同一条 gutter 上。
+ */
+.field-grid {
+  max-width: var(--layout-field-grid-max);
+}
+
+.settings-grid,
+.routing-grid,
+.stats,
+.stats-cols,
+.chat__layout {
+  width: 100%;
+}
+
+.chart__frame,
+[data-role="stats-group-table"],
+[data-role="page-accounts-table"],
+[data-role="keys-table"],
+[data-role="req-table"],
+.table-scroll {
+  max-width: var(--layout-reader-max);
+}
+
+.chat__composer {
+  max-width: var(--layout-composer-max);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--text);
+  font-size: var(--text-meta);
+}
+
+/*
+ * 密集数据表例外：列数多、数字多、需要一屏看全的表（日志页的十四列请求
+ * 表 `.table--dense`）降到 `--text-micro`（13px）。这是本文件里唯一允许覆盖表
+ * 格字号的钩子，禁止逐表写 `font-size`。内边距的覆盖写在 `.table th/td` 之后
+ * （同特异性，后来者胜）：`--space-2` 四边（8px，纵向横向同值）。
+ *
+ * 行高不是常数：这张表的「路由 / 协议」与「用时 / 首响」是两行的小字塔配，
+ * 所以实测行高 56px（两行 40.5px + 8×2 + 1px 分隔线）；单行内容的密集表则落在
+ * 40px（见下面 `.table--dense th/td` 的 `height`）。
+ * 与常规表（单行 45px）的关系是「密集一行能多装一整行」。
+ */
+.table--dense {
+  font-size: var(--text-micro);
+}
+
+/*
+ * 固定列宽的表格变体（统计视图的六维分组表在用）：`table-layout: fixed`，
+ * 两列「长内容」按比例留宽——首列是维度键（模型 id 最长），第五列是「↑出 ↓入」
+ * 两个数并排——其余列均分剩下的宽度。
+ *
+ * 为什么必须固定：auto 布局下列宽跟着当前维度的键长走（模型 id 长、协议名短），
+ * 切 tab 时整张表的列几何会跳。代价是内容可能比列宽长（实测 1000px 宽时
+ * tokens 列的文字会压到延迟列上），所以每个单元格都截断而不是溢出：完整键在
+ * 首列的 `title` 里（app-view-stats.js 写），数字列留了够装两档缩写的宽度。
+ */
+.table--fixed {
+  table-layout: fixed;
+}
+
+.table--fixed th:first-child {
+  width: 24%;
+}
+
+.table--fixed th:nth-child(5) {
+  width: 18%;
+}
+
+.table--fixed th,
+.table--fixed td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
+ * 行高不写死，由内边距撑：14px 正文 × 1.5 行高（21px）+ 上下各 12px = 45px。
+ * 写 `height` 会把内容挤出去：边框盒含内边距。
+ *
+ * 内边距是全文件唯一回落 `--space-3`（12px）的地方：常用间距是
+ * 16/20，表格用 16px 会把行高顶到 53px（一屏少两行）。这一档就是“比常用
+ * 更紧一格”的例外档（见 tokens.css 的间距注释）。
+ *
+ * 对齐是**全项目一张契约**：单元格内的文本一律居中（表头 / 文本 / 数值 / 状态 /
+ * 操作列都是），纵向 `vertical-align: middle` 让单行格与两行小字塔落在同一条中线。
+ * 「居中」指的是**单元格内的内容**，不是表格本身——表格 `width: 100%` 铺满面板。
+ * 逐表不写对齐（`.matrix` / `.req__history` 等块也不散写对齐）。
+ *
+ * 距离**按表自定**：这里给的是常规表（keys / proxies / 统计分组）与矩阵的档位
+ * （四边同 `--space-3`）；密集表在 `.table--dense` 里收到 `--space-2` 四边，
+ * 两张多列常规表挂 `.table--tight` 把横向收一档。内边距是各表按字段密度
+ * 声明的，不设全项目统一值。
+ *
+ * 单元格不画四边框——外层面板已经有一层边框，再给每个
+ * 单元格画一圈就是「框体套框体」的双层边框，那正是「账号状态摘要」表格显得生硬的
+ * 根源。对齐 GitHub Settings 的做法：外层容器出边框，表内只用横向分隔线，表头
+ * 一道重一档（--line），数据行之间一道轻一档（--line-soft），末行不画（面板
+ * 内边距接住），竖向分栏靠列间距自己成立。
+ */
+.table th,
+.table td {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--line-soft);
+  text-align: center;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.table th {
+  border-bottom-color: var(--line);
+  color: var(--muted);
+  font-weight: var(--weight-strong);
+}
+
+/*
+ * 只给读屏器的文本（聊天流结束的播报等）：必须留在可访问树里、视觉上不占位。
+ *
+ * 这类句子不在表格里，绝对定位不会牵动任何布局，所以用通行的「1px 盒子 + 裁切」写法。
+ * **表格名不要用这个类**：`.table__caption` 留在静态流里，理由见那条规则。
+ */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/*
+ * 表格名（`<caption>`）只给读屏器。
+ *
+ * caption 是读屏器进表格时听到的第一句话（「这是哪张表」）；面板标题行已经
+ * 说过同一句，所以它不能占版式。**必须留在静态流里**：Chromium 把
+ * `position: absolute` 的 caption 移出表格布局后，行高的亚像素取整会变
+ * （12px 上下内边距 + 21px 行高 ⇒ 45.5px 塌成 45px），整张表的几何跟着动。
+ * 因此这里不用 `.sr-only`（那是绝对定位），改成「留在流里、高度归零」：
+ * 盒子 0×0、文字不换行、溢出裁掉，读屏器照读，排版一个像素不动。
+ */
+.table__caption {
+  height: 0;
+  padding: 0;
+  overflow: hidden;
+  font-size: 0;
+  line-height: 0;
+  white-space: nowrap;
+}
+
+/*
+ * 表头里的一行小字提示（账号页「代理」列的风控提醒）。
+ *
+ * 它挂在 `<th>` 里而不是控件下面：这句话说的是**这一整列**的口径（多个账号共用一个
+ * 出口地址是风控最在意的一项），不是某一个控件的用法。`.hint` 那套（`max-width: 42ch`
+ * 写在控件列里）在这里不适用——表头没有控件列。
+ *
+ * `white-space` 要显式改回 `normal`：`.table th` 是 `nowrap`，照着继承会让这句
+ * 四十来字的提示把整列撑成一行，把「代理」列从 ~140px 拉到 600px。
+ */
+.table th .th-hint {
+  display: block;
+  max-width: 27ch;
+  margin-top: var(--space-1);
+  white-space: normal;
+  color: var(--faint);
+  font-size: var(--text-micro);
+  font-weight: normal;
+  line-height: 1.35;
+}
+
+/*
+ * 多列常规表的更紧一档（账号摘要 6 列 / 账号页 9 列）：横向 12px 时概览摘要表在
+ * 1000px 视口下会从 671 涨到 708，比面板内容宽，面板得多出一条横向滚动条。横向
+ * 收到 8px、纵向保持在 12px——这两张是常规表里列数最多的，收的是横向那一维，
+ * 行高不变。必须排在 `.table th/td` 之后（同特异性，后来者胜）。
+ */
+.table--tight th,
+.table--tight td {
+  padding: var(--space-3) var(--space-2);
+}
+
+/*
+ * 操作列定宽（`--layout-actions-col` = 160px）：表头写在 th 上，自动布局会把
+ * 它当这一列的最小内容宽，其余列按内容分配剩下的宽度。
+ *
+ * 不给宽度的列跟着内容走：同一张表在中文下与英文下列几何会跳，「累计」这种长
+ * 数字列就被挤到只剩一行的零头。钉住之后，行内三件套占满自己的盒，多出来的宽度
+ * 全落到前面的数字列。
+ *
+ * 三张带操作列的表（账号 / API key / 代理）都挂这个类——只给 keys 页钉宽度时，
+ * 账号页与代理页的操作列随内容伸缩，同一排 ⋯ / 三个按钮在三个页面上占的宽度各不相同。
+ */
+.table th.col-actions {
+  width: var(--layout-actions-col);
+}
+
+/*
+ * 表格行内的控件一律 28px（`--control-height-sm`）。
+ *
+ * 按钮分档是「页面级 36px / 表格行内 28px」：行里 36px 的三件套会把 45px 的行撑到
+ * 53px（一屏少两行），而 28px 是 13px 文字 × 1.5 + 上下各 4px 推出来的那一档。
+ * 这里钉的是三种**没有小号变体**的行内控件：步进器（并发 / 权重）、行内下拉（代理）、
+ * ⋯ 触发键。`.btn--sm` / `.tag--toggle` 是显式变体（写在 DOM 上），不靠这条兜底。
+ *
+ * 作用域是 `.table` 而不是「所有按钮」：表里还有一类不是行内控件的按钮——「加载更早」
+ * 那种跨整行的动作（`.req__history .btn`），它属于页面级动作，仍是 36px。
+ *
+ * 窄屏（≤720px）的 44px 触摸目标写在文件末尾的媒体查询里：这些选择器是 (0,1,1)，
+ * 比 `.btn` / `.select` 的 (0,1,0) 高一档，必须按同一条选择器再压一次。
+ */
+.table .stepper,
+.table .select,
+.table .btn--menu {
+  height: var(--control-height-sm);
+}
+
+/* 方形控件（步进器的两个加减键、⋯ 触发键）：宽度 = 高度，跟着同一档一起收。*/
+.table .stepper__btn,
+.table .btn--menu {
+  width: var(--control-height-sm);
+}
+
+/*
+ * 累计列的两行塔：上面请求数，下面 token 明细。
+ *
+ * 四个数字（请求 / 入 / 出 / 错）串成一行时，1000px 窗口下这一格比
+ * 面板的一半还宽，把整张表顶出横向滚动条。分两行之后同一格窄排三分之一，行高
+ * 从 45 涨到约 64px——与账号页额度列的两行塔（`.quota-cell__line` / `__more`）
+ * 同一套记法：主数字用行内字号，明细降一档到 micro 并靠 --faint。
+ * 塔自身居中（`text-align: center` 管不到 inline-flex 的行盒）。
+ */
+.usage-tower {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.usage-tower__more {
+  font-size: var(--text-micro);
+}
+
+/*
+ * keys 页的 Key 列：掩码值 + 「显示 / 复制」两颗 28px 行内按钮同一格。
+ *
+ * 排版与 `.cell-actions` 同一条对齐口径（flex / center / 组内 8px），但不用它的
+ * 类——那是操作列的钩子（keys / 账号 / 代理三张表共用，运行时测试按「第一个
+ * .cell-actions」定位操作列），挪用会让列定位变成随列序漂移。
+ *
+ * `__value` 放开断字：完整 key 是 50 字符的连续 token（sk-zcp- + 43 个 base64url
+ * 字符），没有空格可折行；不放开的话展开一次就把整张表顶出横向滚动条。
+ * `anywhere` 只在真的放不下时才断——掩码态（短）和窄屏同时受益。
+ *
+ * 这组是行内 flex：单元格的 `text-align` 管不到它，居中也得盒子级给。
+ */
+.key-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  flex-wrap: nowrap;
+}
+
+.key-cell__value {
+  overflow-wrap: anywhere;
+}
+
+/*
+ * 密集数据表的更紧内边距与最小行高：必须排在
+ * `.table th/td` 之后（同特异性，后来者胜）。
+ *
+ * 内边距 `--space-2`（8px）是「micro 字号配套」的那一档：13px 文字 × 1.5 = 19.5px，
+ * 再加 8×2 + 1px 分隔线 = 36.5px——比常规表（45px）矮。只改字号不改行高时，
+ * 「密集表」看起来只是字小了、行还是那么高。`height` 补上那 3.5px 的缺口，
+ * 单行格子落在 40px（验收区间 40–42px）。
+ *
+ * `height` 在单元格上是**最小高度**（CSS 2.1 规范里 cell 的 height 是下限，不是
+ * 固定高度），所以两行小字塔配的格子（reqId + 阶段、↑出 ↓入）照旧长到 56px，
+ * 不会被裁掉——常规表那条「不要写 height」的顾虑在密集表这里不成立。
+ */
+.table--dense th,
+.table--dense td {
+  padding: var(--space-2);
+  height: 40px;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table tbody tr:hover {
+  background: var(--panel-alt);
+}
+
+/*
+ * 从概览页点进来时（`/accounts?focus=<label>`）高亮的那一行：主题色的浅面，
+ * 两秒后由 `app-view-accounts.js` 摘掉。它比 hover 重一档，所以能压过鼠标位置。
+ */
+.table tbody tr.row--focus {
+  background: var(--accent-soft);
+}
+
+/* 整行可点的表格行（概览页的账号摘要）：鼠标形状与键盘焦点都要看得出来。 */
+.table tbody tr[data-href] {
+  cursor: pointer;
+}
+
+/* 复选框列（账号表）：窄列居中，表头是「全选」。单元格文本已全局居中，这里
+   只保留列宽——复选框是行内控件，跟着 `text-align` 落在列中线。 */
+.table .table__check {
+  width: var(--space-6);
+}
+
+/* 整行可点（打开账号详情大窗）的表格行：与 data-href 同一套形状语义。 */
+.table tbody tr[data-dialog-row] {
+  cursor: pointer;
+}
+
+/*
+ * 表格的横向收拢（表内字号到此为止：常规表 meta / 密集表 micro，再降就读不动）。
+ *
+ * 账号表有九列（含调度权重），14px 下在 700px 宽的窗口里会比面板还宽（密集表降到
+ * 13px 也一样）。让面板自己横向滚动，页面不出现横向滚动条（窄屏要的是底部 tabbar +
+ * 纵向滚动，不带横向滚动）。宽屏上表格本来就装得下，这条规则不会带出多余滚动条。
+ */
+.panel:has(> .table) {
+  overflow-x: auto;
+}
+
+/* ------------------------------------------------------------------------- */
+/* 横幅（风控告警 / 鉴权提示 / 错误）                                          */
+/* ------------------------------------------------------------------------- */
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--panel-alt);
+  color: var(--text);
+  font-size: var(--text-meta);
+}
+
+.banner--warn {
+  border-color: var(--warn-border);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.banner--danger {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.banner--ok {
+  border-color: var(--ok-border);
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+/* 横幅里每条告警是一条链接，行内换行时仍要能看出哪几段可点。
+   不用 UA 的蓝色：告警色（`--warn`）由 `.banner--warn` 给，链接只加下划线，
+   不然一条横幅会同时出现两种颜色。 */
+.banner__items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-1);
+  align-items: baseline;
+}
+
+.banner__item {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.banner__item:hover {
+  text-decoration-thickness: 2px;
+}
+
+/* ------------------------------------------------------------------------- */
+/* 并发曲线（图表用 token 上色，不写死十六进制）                               */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * 自绘图表的公共框：`.chart__frame` = 值刻度列 + 绘图区，由
+ * app-charts.js 生成，三个图表（概览并发曲线 / 概览今日 token 缩略 / 统计时序）
+ * 共用。高度由生成时的内联 style 给（纯几何值；viewBox 高度与它
+ * 相等，所以纵向 1:1、刻度线的笔画就是 1px）。
+ *
+ * 刻度列的宽度来自 token（万 / 亿缩写的最长刻度装得下），刻度 span 用
+ * `bottom` 百分比贴在对应网格线上——标签与线共用同一套百分比，两边永不错位。
+ * 基线（0）由 `.chart__plot` 的下边框画：SVG 里 y=height 的线会被视口边缘
+ * 裁掉一半，border 永远是干净的 1px。
+ *
+ * 柱宽按桶数比例分配，不产生最小盒宽度，所以不需要窄屏溢出的 `overflow-x: clip`。
+ */
+.chart__frame {
+  display: flex;
+}
+
+.chart__scale {
+  position: relative;
+  flex: 0 0 var(--layout-chart-scale);
+}
+
+.chart__tick {
+  position: absolute;
+  right: var(--space-2);
+  white-space: nowrap;
+  color: var(--faint);
+  font-size: var(--text-micro);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart__plot {
+  flex: 1;
+  min-width: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.chart__meta {
+  display: flex;
+  justify-content: space-between;
+  margin-top: var(--space-2);
+  color: var(--faint);
+  font-size: var(--text-micro);
+}
+
+/* ------------------------------------------------------------------------- */
+/* 统计视图的自绘图表：SVG 堆叠柱 / 图例 / 热力图 / 错误横条            */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * 统计页的「这张表的控件」：胶囊组，挂在 panel 标题行右侧（token 时序的
+ * 按小时 / 按天、六维分组的六个维度）。
+ *
+ * 与页面级 `.tabs` 的分工：`.tabs` 是「换一整页 / 换一大块」的导航（范围栏、
+ * 页签），底下一条通栏的横线与面板边框叠在一起，读起来像页面导航；这里切的是
+ * **同一张表的行分组 / 画法**，交给一条贴在标题右侧的胶囊更准确——标题说明这张
+ * 表是什么，胶囊说明这张表怎么排。热力图的三档聚合粒度（`.heatmap__tab`）就是
+ * 先例，这里把同一套视觉语言提成通用类，两处不再各写一份。
+ *
+ * 底槽用 panel-alt：胶囊组是一个整体控件，未选中的那几颗要读成「同一组里的
+ * 选项」，靠底槽圈住范围。选中态是 panel 底 + 深色字（与热力图 tab 同一口径：
+ * 选中的那颗「浮」在槽上）。
+ */
+.tabs--seg {
+  /* 允许换行：窄屏（面板内容不足六颗胶囊的宽度）时退成两行，
+     而不是把胶囊压扁或让整组溢出面板。桌面下标题行放得下，永远是一行。 */
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px;
+  border-bottom: 0;
+  border-radius: var(--radius-sm);
+  background: var(--panel-alt);
+}
+
+/* 尺寸取行内控件那一档（28px = 13px × 1.5 + 上下各 4px），与热力图 tab 等高：
+   两处胶囊都是「面板标题行里的小控件」，同高才读成一套。 */
+.tabs--seg .tab {
+  height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-micro);
+  /* 胶囊里一行字，不许折行：折了就是两颗「账号 / 路由」竖排的盒子。
+     窄屏放不下时整组横滚（见下方媒体查询），不靠把胶囊压窄。 */
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+/* 悬停只提亮文字，不换底：槽本身已经是弱一档的面，再铺一层同色系的底色读不出
+   差别；换成更亮的面又会与选中态（panel 底）混起来。 */
+.tabs--seg .tab:hover {
+  background: transparent;
+  color: var(--text);
+}
+
+/* 选中态：panel 底 + 深色字。`.tabs--seg .tab:hover` 是 (0,2,1)，这条也是
+   (0,2,1)——按源序压过 hover，悬停选中项仍读成选中。
+
+   选中态不换字重：字重变化会改盒宽，同排胶囊跟着横移 1–2px。底色与文字色
+   已经足够区分选中，字重留给层级而不是状态。 */
+.tabs--seg .tab--active {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.tabs--seg .tab--active:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+/*
+ * 堆叠柱容器（app-charts.js 的输出就是这一个 `.chart__frame`）。
+ *
+ * 宽高比不在这里：viewBox 固定 600 宽、preserveAspectRatio="none"，svg 自己
+ * 拉伸到容器宽；高度来自 frame 的内联 style（统计视图 160px、概览缩略 72px）。
+ * rect/path 的填色走 token（主题色留给「重点」）：入柱用 accent-border
+ * （浅一档）、出柱用 accent（深一档），图例与柱子共用同一组类名色值，
+ * 明暗两套主题各取各的。网格线比基线浅一档（line-soft vs line）。
+ *
+ * shape-rendering 只给网格线：柱子的圆角顶（2px）需要抗锯齿才不毛糙。
+ */
+.tokchart {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.tokchart__grid {
+  stroke: var(--line-soft);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.tokchart__in:hover,
+.tokchart__out:hover,
+.tokchart__bar:hover {
+  opacity: 0.8;
+}
+
+.tokchart__in {
+  fill: var(--accent-border);
+}
+
+.tokchart__out {
+  fill: var(--accent);
+}
+
+/* 单系柱（概览并发曲线）：常态浅一档，峰值柱实心强调——与堆叠柱的入 / 出
+   两档同一色相系。 */
+.tokchart__bar {
+  fill: var(--accent-border);
+}
+
+.tokchart__bar--peak {
+  fill: var(--accent);
+}
+
+/* 图例：色块 + 名称，两个视图共用。色块尺寸与热力图格子同档（12px）。*/
+.chart__legend {
+  margin-top: var(--space-2);
+}
+
+.legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--faint);
+  font-size: var(--text-micro);
+}
+
+.legend__swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+}
+
+.legend__swatch--in {
+  background: var(--accent-border);
+}
+
+.legend__swatch--out {
+  background: var(--accent);
+}
+
+/* 概览页的时序缩略：整图是一个链接（点击去统计视图的「今天」），去掉
+   下划线与链接色，让图表自己当内容。 */
+.usage-link {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+
+/*
+ * 热力图（对齐官方 BigModel 控制台的特写）：tab（每日 / 每周 / 累计，选中态胶囊）
+ * + 网格 + 底部月轴 + 悬停 tooltip。
+ *
+ * 版式（对照 .orca/ref-heatmap-closeup.png）：
+ *
+ *   网格撑满    列 = 周（列数由 JS 按日桶算出，写进 `--heatmap-cols`），列宽
+ *              `minmax(12px, 1fr)`——宽屏 1fr 撑满容器（格子固定 12px、
+ *              `safe center` 居中时，53 列铺不满宽卡就在两侧留白），窄屏 12px
+ *              保底 + 外层横滚（格子缩到点不准就没法看 tooltip 了）。
+ *   7 行        周一→周日（官方按周一起算）。
+ *   月轴在底    与格子同一列模板（同 var 同 gap 才对得齐），标签落在各月
+ *              首周列（JS 按月变化日算列号写 inline gridColumn，纯几何）。
+ *   tooltip     悬停浮层（不是 title）：第一行日期、第二行「Tokens 消耗 X |
+ *              MCP 消耗 Y次」，绝对定位在卡片内（开合统一走 hidden 属性）。
+ *
+ * 色阶 5 档走 token（--heat-0..4，官方蓝色系，采样自官方热力图），只给
+ * 热力图格子，不外溢到其它组件。
+ */
+.heatmap-panel {
+  padding: var(--space-4);
+  position: relative;
+}
+
+.heatmap__tabs {
+  display: flex;
+  gap: var(--space-1);
+  margin-bottom: var(--space-3);
+}
+
+/* tab 胶囊（特写：选中态浅灰圆角底 + 深色字，未选中纯灰字）。28px 是表格行内
+   控件小号档（28px），热力图 tab 与之同高——同排胶囊要等高才不散。 */
+.heatmap__tab {
+  height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: var(--text-meta);
+  cursor: pointer;
+}
+
+.heatmap__tab:hover {
+  background: var(--panel-alt);
+  color: var(--text);
+}
+
+.heatmap__tab--active {
+  background: var(--panel-alt);
+  color: var(--text);
+}
+
+/* 外层横滚：窄屏保底列宽（12px）超出容器时滚，宽屏 1fr 撑满不滚。 */
+.heatmap {
+  position: relative;
+  overflow-x: auto;
+  padding-bottom: var(--space-1);
+}
+
+/* 格子缸：列模板一份（JS 写 --heatmap-cols），行 7 条（周一起算）。 */
+.heatmap__grid {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, auto);
+  grid-template-columns: repeat(var(--heatmap-cols, 53), minmax(12px, 1fr));
+  gap: var(--space-1);
+}
+
+/* 周格视图（每周 tab）：一格一周，整块只剩一行。 */
+.heatmap__grid--flat {
+  grid-template-rows: repeat(1, auto);
+}
+
+.heatmap__cell {
+  aspect-ratio: 1;
+  border-radius: 2px;
+  background: var(--heat-0);
+}
+
+/* 键盘可达的格子（`tabindex="0"`）：`:focus-visible` 的全局轮廓在 4–12px 的格子上
+   会糊到邻格，这里换成内描边，盒子尺寸不变（不影响列几何与横滚）。 */
+.heatmap__cell:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* 占位格（首列前的空位 + 最后一周补齐的尾格）：透明无描边，与「存在但没有
+   用量」的 l0 不同——前者是「不存在的日子」。 */
+.heatmap__cell--void {
+  background: transparent;
+}
+
+.heatmap__cell--l0 {
+  background: var(--heat-0);
+}
+
+.heatmap__cell--l1 {
+  background: var(--heat-1);
+}
+
+.heatmap__cell--l2 {
+  background: var(--heat-2);
+}
+
+.heatmap__cell--l3 {
+  background: var(--heat-3);
+}
+
+.heatmap__cell--l4 {
+  background: var(--heat-4);
+}
+
+/* 月轴：与格子同列模板同 gap，标签落在各月首周列（gridColumn 由 JS 算）。 */
+.heatmap__months {
+  display: grid;
+  grid-template-columns: repeat(var(--heatmap-cols, 53), minmax(12px, 1fr));
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+  font-size: var(--text-micro);
+  line-height: 1;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.heatmap__month {
+  grid-row: 1;
+}
+
+/* tooltip 浮层：白卡 + 浅阴影（披露式小浮层那一档），开合走 hidden。
+   不抢指针（pointer-events: none）——跟着格子走，不挡 hover。 */
+.heatmap__tip {
+  position: absolute;
+  z-index: var(--layer-modal);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: var(--shadow-panel);
+  font-size: var(--text-micro);
+  line-height: 1.5;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.heatmap__tip-date {
+  color: var(--muted);
+}
+
+.heatmap__tip-label {
+  color: var(--muted);
+}
+
+.heatmap__tip-value {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.heatmap__tip-sep {
+  margin: 0 var(--space-1);
+  color: var(--line);
+}
+
+/*
+ * 错误横条（错误分析：用户词 + hint + 横条 + 次数）：三列网格。
+ * 横条走 danger 系（danger 只给失败），底轨用 panel-alt。
+ *
+ * 名字列要给 hint 留出整句宽：这一块只占半幅面板（`.stats-cols` 的一列），
+ * 名字列再按整幅宽的老值定死（80–160px），中文 hint 的末字就会被折到第二行
+ * 单独成行。名字列的上限与 `.hbar__hint` 的 42ch 同档，横条拿中间剩下的
+ * `1fr`、次数贴右缘。
+ *
+ * 横条这边必须有长度型的下限（`minmax(48px, 1fr)`，不是裸 `1fr`）：网格先把
+ * 非弹性轨道的 base size 撑向各自的上限，名字列那 42ch 上限会在弹性分配之前
+ * 吃光窄面板的全部剩余空间，裸 `1fr` 于是在 1000px 视口下量到 0 宽——横条整条
+ * 消失，只剩名字与次数。下限同时不能大：80px 时名字列在 1100px 视口只剩
+ * 241px，「怎么办：上游风控标记，长冷却后自动恢复」正好被折成一个孤字；
+ * 48px 把这段宽度让回名字列，同一条 hint 在那里仍是整句。
+ */
+.hbar {
+  display: grid;
+  grid-template-columns: minmax(0, 42ch) minmax(48px, 1fr) auto;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-1) 0;
+  font-size: var(--text-micro);
+}
+
+/*
+ * 错误分析每行的「用户词 + hint」两层文字。名字列限宽不变，
+ * hint 在名字下面折行（--faint 第三层色、--text-micro 字号，与 .hint 同一套
+ * 约定）；行高由内容自己撑，不写死高度，长英文 hint 也不会被截断。
+ */
+.hbar__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hbar--error .hbar__name {
+  overflow: visible;
+  white-space: normal;
+}
+
+.hbar__hint {
+  display: block;
+  max-width: 42ch;
+  color: var(--faint);
+  font-size: var(--text-micro);
+}
+
+.hbar__track {
+  display: block;
+  height: var(--space-2);
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--panel-alt);
+}
+
+.hbar__fill {
+  display: block;
+  height: 100%;
+  background: var(--danger);
+}
+
+.hbar__count {
+  color: var(--muted);
+  /* 错误分析右侧的次数列，与同一列的上下一行比大小。 */
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * 单分类：一个方向只剩一种分类时，满宽条没有对比对象——
+ * `count / max` 恒等于 1，条子永远画满整轨（100%），读者从条长上读不出
+ * 「8 次」是大还是小，只看见一根满宽红条。改成「分类名 × 次数」的一行文本：
+ * 两列网格（名字 + 次数）保留 `.hbar` 的行节奏与字号，只去掉轨与填充。
+ * 名字列吃满剩余宽、次数贴右缘——半幅面板里名字列若按内容宽收到 160px，
+ * 读者会以为这块内容还没画完。
+ */
+.hbar--single {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+/*
+ * 统计视图下半部分的两列：左列整高放错误分析，右列竖着叠调度事件与缓存命中率。
+ * 两列由 `.stats-cols` 的默认 stretch 拉到等高，右列内部两块按内容高自上而下排，
+ * 不在底部留一段被拉开的空白。
+ *
+ * 它只是布局容器：不画边框、不给背景、不加内边距——面板的框只由 `.panel` 一层
+ * 表达（双层框禁令）。
+ */
+.stats-cols {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-5);
+}
+
+.stats-side {
+  display: grid;
+  grid-template-rows: auto auto;
+  align-content: start;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+/* 统计卡的补充行（总 token 卡的「↑出 ↓入」）：主数字下面的小字，不是标签。 */
+.stat__sub {
+  color: var(--faint);
+  font-size: var(--text-micro);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------------------- */
+/* 排版辅助                                                                   */
+/* ------------------------------------------------------------------------- */
+
+.grid {
+  display: grid;
+  gap: var(--space-4);
+}
+
+/*
+ * 概览页的四张指标卡：四等分；卡片间距取 space-5
+ * （与区块间距同一拍，八张卡折两行时上下、左右都是同一个值）。
+ *
+ * 高度不写死：内边距由密度档给，标签与数字自己撑出那一块。窄屏折成两列、
+ * 再窄一列。`--layout-metric-max` 钳住每张卡的可读宽度：内容列在超宽屏下
+ * 变宽时，卡不会跟着拉成长条，多出来的空间留在网格右侧。
+ */
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, min(var(--layout-metric-max), 100%)));
+  justify-content: start;
+  gap: var(--space-5);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/*
+ * 导入 / 导出两行的首件控件（「选择文件」按钮 / 格式下拉）取同一档定宽。
+ *
+ * 两件各按内容定宽时：中文 90 / 74px，英文 118 / 118px——同一页同一个位置，
+ * 两行的密码框起点与宽度却随语言漂移，一行一个样。定宽之后两行的控件列对齐成
+ * 两条竖线（同一组里控件列起点必须一致）。
+ *
+ * 8rem = 128px：英文最宽的「Choose file」实测 118px，留 10px 余量；中文
+ * 「选择文件」90px 自然居中。这是几何值（同 `.field--num` 的 4.5rem 先例，不受间距档约束），
+ * 不是新的间距档。
+ */
+.transfer-row > .btn,
+.transfer-row > .select {
+  flex: 0 0 auto;
+  width: 8rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.faint {
+  color: var(--faint);
+}
+
+.accent {
+  color: var(--accent);
+}
+
+.ok {
+  color: var(--ok);
+}
+
+.warn {
+  color: var(--warn);
+}
+
+.danger {
+  color: var(--danger);
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+/*
+ * 数值列：`.num` **只管等宽数字**（tabular-nums），
+ * 不管对齐。右对齐要自己写 `text-align`（例：`.field--num` 的输入框、`.stepper__value`
+ * 的居中、`.req__stage-at` 的右对齐）。表格里的数值列一律靠左，只靠等宽
+ * 数字把位数对齐。
+ */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------------------- */
+/* 密度档（只改容器圆角与内边距，组件定义与字号不动）                           */
+/* ------------------------------------------------------------------------- */
+
+.comfortable {
+  --density-radius: var(--density-comfortable-radius);
+  --density-pad: var(--density-comfortable-pad);
+}
+
+.medium {
+  --density-radius: var(--density-medium-radius);
+  --density-pad: var(--density-medium-pad);
+}
+
+.dense {
+  --density-radius: var(--density-compact-radius);
+  --density-pad: var(--density-compact-pad);
+}
+
+/* ------------------------------------------------------------------------- */
+/* 响应式：窄屏收起侧边栏，换成底部 tab                                        */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * 指标卡折行：900px 以下两列，600px 以下一列。
+ *
+ * 四列在 900px 左右的窗口里每张只有 200px 上下，数字与标签仍放得下，但一块块
+ * 挤在一起不如半屏一张读得快。两条断点按宽度从宽到窄排列，600px 那条写在后面，
+ * 所以手机上一列会盖过两列。
+ */
+@media (max-width: 900px) {
+  .metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* 统计视图的两列并排（错误分析 / 调度+缓存）在窄屏退成单列。 */
+  .stats-cols {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 600px) {
+  .metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .sidebar {
+    display: none;
+  }
+
+  /* 侧边栏整体退场（换成底部 tabbar）后，折叠按钮没有可折的对象：
+     留着它就是一颗点了没反应的按钮。
+     选择器写成 `.btn.appbar__sidebar-toggle`（0,2,0）而不是单个类：`.btn.btn--icon`
+     也是两个类，并且它把 display 写成 `inline-grid`——单类选择器会被它盖掉，
+     媒体查询里的这条就静默失效（实测 390px 下按钮仍在）。 */
+  .btn.appbar__sidebar-toggle {
+    display: none;
+  }
+
+  .tabbar {
+    display: flex;
+  }
+
+  :root {
+    --layout-content-gutter: var(--space-4);
+  }
+
+  .content {
+    padding: var(--layout-content-gutter);
+  }
+
+  /*
+   * 触摸目标：手机上所有可点的东西至少 44px 高。桌面保持 36px 的控件档；
+   * `--layout-touch-min` 只在这条媒体查询里生效。
+   */
+  .btn,
+  .field,
+  .select {
+    height: var(--layout-touch-min);
+  }
+
+  .nav,
+  .tab,
+  .tabbar__item,
+  .switch {
+    min-height: var(--layout-touch-min);
+  }
+
+  /* 文字链接是行内元素，`min-height` 对它无效，先把它变成可撑高的行内盒 */
+  .link {
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--layout-touch-min);
+  }
+
+  /*
+   * 字段格在手机上仍是标签在上（骨架本来就是），只需放开触屏命中高度：
+   * 单行字段的控件本身已经走 `.field` / `.select` 的 44px 档（上面那三条），
+   * 行内排的格子把最小高度一起抬到触屏档，标签与开关否则会比控件矮一截。
+   */
+  .field-cell--inline {
+    min-height: var(--layout-touch-min);
+  }
+
+  /*
+   * 表格行内控件档（28px）在触摸屏上回到 44px。
+   *
+   * `.btn--sm` 靠上面的 `.btn { height: 44px }` 自动被盖回去（同为 0,1,0，媒体查询
+   * 写在后面）；但 `.table .stepper` / `.table .select` / `.table .btn--menu` 是
+   * (0,1,1)，比那三条高一档，必须按同一条选择器再压一次。`.tag--toggle` 不是 `.btn`，
+   * 它从来没有被触摸档拉高过，一并补上。
+   */
+  .table .stepper,
+  .table .stepper__btn,
+  .table .select,
+  .table .btn--menu,
+  .tag--toggle {
+    height: var(--layout-touch-min);
+  }
+
+  .table .stepper__btn,
+  .table .btn--menu {
+    width: var(--layout-touch-min);
+  }
+}

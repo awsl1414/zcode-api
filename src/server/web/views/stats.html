@@ -1,0 +1,238 @@
+          <!-- ①.5 统计视图：getUsageStats 的报表页。范围栏 + 总览卡行
+               + token 时序 + 六维分组 + 错误分析 + 调度事件 + 缓存命中率 + 热力图。
+               数据只在这里拉取（进视图一次、切范围重拉、顶栏刷新重拉，无轮询）;
+               图表全部自绘（app-charts.js 的 SVG 堆叠柱 / CSS grid 热力图），
+               无 chart 库。范围与跳转都是 URL 查询参数：/stats?range=…，
+               key 维度行跳 /logs?tab=requests&key=…。 -->
+          <div class="page comfortable" data-view="stats" hidden>
+            <header class="page-header">
+              <div class="page-header__heading">
+                <h1 class="page-title" data-i18n="stats.title">统计</h1>
+              </div>
+            </header>
+            <div class="page-body">
+
+            <!-- 范围栏：四个范围 tab。切范围重拉、进视图拉一次，无轮询。
+                 刷新收敛到顶栏那颗按钮——它在这一页就是
+                 「按当前范围重拉」（app-view-stats.js 的 refresh 调同一个 load）。 -->
+            <div class="toolbar">
+              <div class="tabs" role="tablist">
+                <button type="button" class="tab tab--active" role="tab" aria-selected="true" data-stats-range="today" data-i18n="stats.range.today">今天</button>
+                <button type="button" class="tab" role="tab" aria-selected="false" data-stats-range="7d" data-i18n="stats.range.7d">7 天</button>
+                <button type="button" class="tab" role="tab" aria-selected="false" data-stats-range="30d" data-i18n="stats.range.30d">30 天</button>
+                <button type="button" class="tab" role="tab" aria-selected="false" data-stats-range="all" data-i18n="stats.range.all">全部</button>
+              </div>
+            </div>
+
+            <!-- 错误横幅（命令失败才出现）与首拍加载行（还没有任何数据时）。 -->
+            <div class="banner banner--danger" data-role="stats-error" role="alert" hidden>
+              <span data-role="stats-error-text"></span>
+            </div>
+            <p class="empty-inline" data-role="stats-loading" hidden data-i18n="stats.loading">加载中…</p>
+
+            <!-- 总览卡行（六张，与账号页顶部统计行同一套 .stat 组件）。 -->
+            <div class="stats">
+              <div class="stat">
+                <div class="stat__value" data-role="stats-requests">—</div>
+                <div class="stat__label" data-i18n="stats.card.requests">请求数</div>
+              </div>
+              <div class="stat">
+                <div class="stat__value" data-role="stats-successRate">—</div>
+                <div class="stat__label" data-i18n="stats.card.successRate">成功率</div>
+              </div>
+              <div class="stat">
+                <div class="stat__value" data-role="stats-tokens">—</div>
+                <div class="stat__sub num" data-role="stats-tokens-sub"></div>
+                <div class="stat__label" data-i18n="stats.card.tokens">总 token</div>
+              </div>
+              <div class="stat">
+                <div class="stat__value" data-role="stats-ttfb">—</div>
+                <div class="stat__label" data-i18n="stats.card.ttfb">平均首响</div>
+              </div>
+              <div class="stat">
+                <div class="stat__value" data-role="stats-tps">—</div>
+                <div class="stat__label" data-i18n="stats.card.tps">平均速率</div>
+              </div>
+              <div class="stat">
+                <div class="stat__value" data-role="stats-errors">—</div>
+                <div class="stat__label" data-i18n="stats.card.errors">错误数</div>
+              </div>
+            </div>
+
+            <!-- token 时序：按小时 / 按天切换（同一份应答里的两组桶，切按不重拉）；
+                 入/出堆叠柱由 app-charts.js 自绘，图例与峰值 / 合计行只在有图时出现。
+                 粒度是「这张表怎么画」的控件，用胶囊组放标题行右侧（`.tabs--seg`）。 -->
+            <section class="panel">
+              <div class="toolbar">
+                <h2 class="section-title" data-i18n="stats.series.title">token 时序</h2>
+                <span class="toolbar__spacer"></span>
+                <div class="tabs tabs--seg" role="tablist">
+                  <button type="button" class="tab tab--active" role="tab" aria-selected="true" data-stats-gran="hourly" data-i18n="stats.series.hourly">按小时</button>
+                  <button type="button" class="tab" role="tab" aria-selected="false" data-stats-gran="daily" data-i18n="stats.series.daily">按天</button>
+                </div>
+              </div>
+              <!-- 图框常驻（没有数据画基线 + 提示行），不整体隐藏。 -->
+              <div data-role="stats-chart"></div>
+              <!-- 提示行的文案由视图按「真的没请求 / 有请求但没 token」两句分写：
+                   `data-i18n` 会覆盖整个元素，所以动态文案
+                   落在内层 span 上，与热力图空态同一种写法。 -->
+              <p class="empty-inline" data-role="stats-chart-empty" hidden><span data-role="stats-chart-empty-text">该范围还没有请求。</span></p>
+              <div class="row chart__legend" data-role="stats-legend" hidden>
+                <span class="legend__item"><span class="legend__swatch legend__swatch--in"></span><span data-i18n="stats.legend.in">输入</span></span>
+                <span class="legend__item"><span class="legend__swatch legend__swatch--out"></span><span data-i18n="stats.legend.out">输出</span></span>
+              </div>
+              <div class="chart__meta" data-role="stats-chart-meta" hidden>
+                <span data-role="stats-chart-peak">—</span>
+                <span data-role="stats-chart-total">—</span>
+              </div>
+            </section>
+
+            <!-- 六维分组：一行 tab 切维度，表形状全部一致。API key 维度的行整行
+                 可点，跳日志页带 key 筛选（视图里拼 data-href）。
+
+                 维度 tab 是「这张表怎么分组」的控件，与 token 时序的粒度切换同款：
+                 胶囊组放 panel 标题行右侧。表头首列恒为「维度」——「这是哪种分组」
+                 只由 tab 说一次，表头不跟着维度名变（两者曾都从 dimension.id 派生，
+                 同一件事说了两遍）。 -->
+            <section class="panel">
+              <div class="toolbar">
+                <h2 class="section-title" data-i18n="stats.groups.title">分组统计</h2>
+                <span class="toolbar__spacer"></span>
+                <div class="tabs tabs--seg" role="tablist">
+                  <button type="button" class="tab tab--active" role="tab" aria-selected="true" data-stats-dim="account" data-i18n="stats.dim.account">账号</button>
+                  <button type="button" class="tab" role="tab" aria-selected="false" data-stats-dim="route" data-i18n="stats.dim.route">路由</button>
+                  <button type="button" class="tab" role="tab" aria-selected="false" data-stats-dim="model" data-i18n="stats.dim.model">模型</button>
+                  <button type="button" class="tab" role="tab" aria-selected="false" data-stats-dim="apiKey" data-i18n="stats.dim.apiKey">API key</button>
+                  <button type="button" class="tab" role="tab" aria-selected="false" data-stats-dim="protocol" data-i18n="stats.dim.protocol">协议</button>
+                  <button type="button" class="tab" role="tab" aria-selected="false" data-stats-dim="clientKind" data-i18n="stats.dim.clientKind">客户端</button>
+                </div>
+              </div>
+              <!-- 列宽对齐（table--fixed）：首列固定比例，其余列均分，
+                   六个维度之间切换时列几何不再跳；长模型 id 截断在首列内。 -->
+              <table class="table table--fixed" data-role="stats-group-table">
+                <caption class="table__caption" data-i18n="stats.groups.title">分组统计</caption>
+                <thead>
+                  <tr>
+                    <th scope="col" data-role="stats-group-key" data-i18n="stats.dim.columnHeader">维度</th>
+                    <th scope="col" data-i18n="stats.col.requests">请求</th>
+                    <th scope="col" data-i18n="stats.col.failed">失败</th>
+                    <th scope="col" data-i18n="stats.col.successRate">成功率</th>
+                    <th scope="col" data-i18n="stats.col.tokens">token</th>
+                    <!-- 两个长表头带 title（固定列宽在窄屏下会截断，完整名字悬停可读）。 -->
+                    <th scope="col" data-i18n="stats.col.avgLatency" data-i18n-attr="title:stats.col.avgLatency">均延迟</th>
+                    <th scope="col" data-i18n="stats.col.avgRate" data-i18n-attr="title:stats.col.avgRate">均速率</th>
+                  </tr>
+                </thead>
+                <tbody data-role="stats-group-body"></tbody>
+              </table>
+              <p class="empty-inline" data-role="stats-groups-empty" hidden data-i18n="stats.groups.empty">该范围没有分组数据。</p>
+            </section>
+
+            <!-- 错误分析与调度 / 缓存两块面板配成两列：左列整高放错误分析
+                 （它按 errorCode 折叠，行数不定），右列竖着叠调度事件与缓存命中率。
+                 两列由 `.stats-cols` 拉到等高，窄屏各占一行。 -->
+            <div class="stats-cols">
+              <!-- 错误分析：同一份 `errors[]` 按 errorCode 折叠，
+                   每个错误一行「用户词 + hint + 次数」。键由产生点落下，i18n 只做
+                   `errorCode.<code>` → 用户词 / hint，不猜 stage 或消息文案。 -->
+              <section class="panel">
+                <h2 class="section-title" data-i18n="stats.errors.title">错误分析</h2>
+                <p class="hint" data-i18n="stats.errors.hint">发生了什么 + 怎么办</p>
+                <p class="stat__label" data-i18n="stats.errors.byCode">按错误</p>
+                <div data-role="stats-kinds"></div>
+                <p class="empty-inline" data-role="stats-kinds-empty" hidden data-i18n="stats.errors.empty">该范围没有错误。</p>
+              </section>
+
+              <!-- 右列只是布局容器：把两块面板竖着排（`stats-side` 只给行距，
+                   不画第二层框）。调度事件是调度器独有的可观测面，缓存命中率按
+                   有效样本口径算，两者各自成块、高度按内容分配。 -->
+              <div class="stats-side">
+                <section class="panel">
+                  <h2 class="section-title" data-i18n="stats.schedule.title">调度事件</h2>
+                  <!-- 三张计数卡固定三列等宽（不跟 `.stats` 的 auto-fit 走 ——
+                       面板只有半幅宽时 auto-fit 会折成 2+1，与列宽脱节）。 -->
+                  <div class="stats stats--triple">
+                    <div class="stat">
+                      <div class="stat__value" data-role="stats-degraded">—</div>
+                      <div class="stat__label" data-i18n="stats.schedule.degraded">降级</div>
+                    </div>
+                    <div class="stat">
+                      <div class="stat__value" data-role="stats-cooled">—</div>
+                      <div class="stat__label" data-i18n="stats.schedule.cooled">冷却换号</div>
+                    </div>
+                    <div class="stat">
+                      <div class="stat__value" data-role="stats-queueTimeout">—</div>
+                      <div class="stat__label" data-i18n="stats.schedule.queueTimeout.count">排队超时</div>
+                    </div>
+                  </div>
+                </section>
+                <section class="panel">
+                  <h2 class="section-title" data-i18n="stats.cache.title">缓存命中率</h2>
+                  <div data-role="stats-cache-data" hidden>
+                    <div class="stat__value" data-role="stats-cache-rate">—</div>
+                    <div class="meter"><span class="meter__fill" data-role="stats-cache-fill" style="width:0%"></span></div>
+                    <p class="hint num" data-role="stats-cache-sub"></p>
+                  </div>
+                  <p class="empty-inline" data-role="stats-cache-empty" hidden data-i18n="stats.cache.noData">暂无缓存数据</p>
+                  <p class="hint" data-i18n="stats.cache.hint" data-i18n-attr="title:stats.cache.hint">命中率 = 读 / (输入 + 读 + 写)，只计有效样本。</p>
+                </section>
+              </div>
+            </div>
+
+            <!-- 365 天热力图（对齐官方 BigModel 控制台的特写）：tab（每日/每周/累计，
+                 选中态胶囊）+ 网格（周为列、周一起算 7 行）+ 底部月轴 + 悬停 tooltip。
+
+                 版式要点（对照 .orca/ref-heatmap-closeup.png）：
+                   无右侧空白  列数按时间范围算满，列宽 1fr 撑满容器（固定
+                              12px 格子铺不满宽卡，两侧留白）
+                   色阶 5 档   浅灰（零）→ 深蓝（最高档），官方蓝色系（--heat-0..4）
+                   月轴在底    对齐各月首周列（与格子同一列模板）
+                   tooltip     悬停浮层：日期 + 「Tokens 消耗 X | MCP 消耗 Y次」
+                 结构：外层 `.heatmap` 横滚滑块（窄屏保底），里面格子缸 + 月轴
+                 共用 `--heatmap-cols` 列模板；tooltip 卡内绝对定位（hidden 开合）。
+                 三档聚合粒度：每日=日格、每周=周格聚合、累计=总量分档。 -->
+            <section class="panel heatmap-panel">
+              <h2 class="section-title" data-i18n="stats.heatmap.title">活跃热力图</h2>
+              <div class="heatmap__tabs" role="tablist">
+                <button type="button" class="heatmap__tab heatmap__tab--active" role="tab" aria-selected="true" data-heatmap-gran="daily" data-i18n="stats.heatmap.tab.daily">每日</button>
+                <button type="button" class="heatmap__tab" role="tab" aria-selected="false" data-heatmap-gran="weekly" data-i18n="stats.heatmap.tab.weekly">每周</button>
+                <button type="button" class="heatmap__tab" role="tab" aria-selected="false" data-heatmap-gran="cumulative" data-i18n="stats.heatmap.tab.cumulative">累计</button>
+              </div>
+              <div class="heatmap" data-role="stats-heatmap">
+                <!-- 容器是 `group`：格子之间只有时间顺序，没有行 / 列语义，`grid` 会要求
+                     `row` 子节点、套上去只是多一层假结构。键盘入口是 roving tabindex
+                     （整张网格只有一个 Tab 停靠点，方向键在格子间移动，Home / End 跳首尾）；
+                     每格 `aria-label` 是日期 + Tokens + MCP，与悬停浮层同一份数据。
+                     `aria-describedby` 把五档色阶的那句话挂在容器上：读屏进网格就先听到它。 -->
+                <div
+                  class="heatmap__grid"
+                  data-role="heatmap-grid"
+                  role="group"
+                  data-i18n-attr="aria-label:ui.heatmap.gridLabel"
+                  aria-label="每日用量热力图"
+                  aria-describedby="heatmap-scale"
+                ></div>
+                <div class="heatmap__months" data-role="heatmap-months" aria-hidden="true"></div>
+              </div>
+              <!-- 五档色阶的文字通道：色深只说「多 / 少」，档位含义要有一句话。
+                   视觉上隐藏，读屏器进网格时顺着 `aria-describedby` 一起拿到。 -->
+              <p class="sr-only" id="heatmap-scale" data-i18n="ui.heatmap.legend">色阶：越深用量越大。零 → 最低 → 低 → 中 → 高 → 最高五档。</p>
+              <!-- 浮层是**视觉**那一半：键盘聚焦时同步显示同样的两行，读屏器读的是
+                   格子自己的 `aria-label`（内容等价）。所以浮层对可访问树隐藏，
+                   朗读只发生一次——否则焦点一落到格子上会把同一句话念两遍。 -->
+              <div class="heatmap__tip" data-role="heatmap-tip" aria-hidden="true" hidden>
+                <div class="heatmap__tip-date" data-role="heatmap-tip-date"></div>
+                <div>
+                  <span class="heatmap__tip-label" data-i18n="stats.heatmap.tip.tokens">Tokens 消耗</span>
+                  <span class="heatmap__tip-value" data-role="heatmap-tip-tokens">—</span>
+                  <span class="heatmap__tip-sep">|</span>
+                  <span class="heatmap__tip-label" data-i18n="stats.heatmap.tip.mcp">MCP 消耗</span>
+                  <span class="heatmap__tip-value" data-role="heatmap-tip-mcp">—</span>
+                </div>
+              </div>
+              <p class="empty-inline" data-role="stats-heatmap-empty" hidden>
+                <span data-role="stats-heatmap-empty-text"></span>
+              </p>
+            </section>
+            </div>
+          </div>

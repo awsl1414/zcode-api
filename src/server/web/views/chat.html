@@ -1,0 +1,216 @@
+          <!-- ⑧ 聊天（「使用面与管理面分离」，以视图而非独立页呈现）：
+               左侧会话栏（窄屏折进顶部的
+               下拉）与账号 → 套餐 → 模型 → key 四层下拉。选择快照随会话存
+               localStorage（zcode-chat- 前缀），切会话连带切换。 -->
+          <div class="page medium" data-view="chat" hidden>
+            <!-- 页面标题走 PageHeader：与其他视图同一层骨架。 -->
+            <header class="page-header">
+              <div class="page-header__heading">
+                <h1 class="page-title" data-i18n="nav.chat">聊天</h1>
+                <p class="page-header__desc" data-i18n="chat.description">和代理链路直接对话，回复实时流出；会话保存在这台浏览器里，可切换、可继续。</p>
+              </div>
+            </header>
+            <div class="page-body page-body--fill">
+
+            <!-- 错误提示：请求失败、流中断、模型列表读不到都走这一条横幅 -->
+            <div class="banner banner--danger" data-role="chat-error" role="alert" hidden>
+              <span data-role="chat-error-text"></span>
+            </div>
+            <!-- 提示（非错误）：目前只有存储接近上限的「删旧会话」提醒 -->
+            <div class="banner banner--warn" data-role="chat-notice" role="status" hidden>
+              <span data-role="chat-notice-text"></span>
+            </div>
+
+            <!-- 主布局：左会话栏 + 右聊天。窄屏（≤1024px）会话栏隐藏，折进
+                 chat__sessionbar 的下拉。会话栏自带面板框体
+                 （与右侧同一套 border/radius），与右侧内容区同高——三块
+                 （会话栏 / 选择器区 / 消息区）宽度与框体对齐全页基准
+                 （容器 8px 圆角、1px --line 边界、16px 内边距）。
+
+                 fill 模式：这一页要「输入框永远在视野里」，所以 page-body
+                 不滚。高度顺 fill-chain 一路传到 .chat__log（唯一的滚动区）：
+                 page-body → chat__layout（网格）→ chat__main → chat__panel → chat__log。
+                 中间每一层都写 min-height: 0，否则弹性项的最小内容高度会把
+                 输入区顶出视口。 -->
+            <div class="chat__layout fill-chain">
+              <aside class="chat__sidebar" data-role="chat-sidebar">
+                <span class="chat__sidebar-title" data-i18n="chat.sessions.title">会话</span>
+                <!-- 会话列表本身就是滚动容器：新建按钮在这一层，与列表项
+                     落在同一个内容框里，滚动条出现时两者一起被收窄——按钮放在
+                     列表的兄弟节点上，滚动条一出现就比列表项宽 15px（用户实测
+                     「加号按钮与会话项不等宽」）。按钮 sticky 在顶部，滚长列表时
+                     新建入口不跟着走。 -->
+                <div class="chat__session-list" data-role="chat-session-list">
+                  <!-- 新建：列表同宽的长方形按钮，居中一个 Lucide plus——
+                       与下面的会话项等宽等距，读作列表的第一个条目。点击行为在
+                       app-view-chat.js 里绑（当前会话为空时去重）。
+                       外层槽位 sticky：按钮自己粘在列表顶部，槽位的背景
+                       与下留白让滚动上来的会话项在按钮下沿整齐地被剪掉，而不是
+                       在半行中间糊在一起。 -->
+                  <div class="chat__new-slot">
+                    <button
+                      type="button"
+                      class="btn chat__new"
+                      data-role="chat-new"
+                      data-i18n-attr="aria-label:chat.sessions.newSession,title:chat.sessions.newSession"
+                      aria-label="新建会话"
+                      title="新建会话"
+                    >
+                      <svg class="btn__icon" aria-hidden="true" focusable="false"><use href="#icon-plus" /></svg>
+                    </button>
+                  </div>
+                  <!-- 会话项是运行时重建的 DOM：点击切换、双击标题重命名、F2 重命名、
+                       ✕ 删除（直接删除 + 5 秒撤销条，不弹二次确认）都在
+                       app-view-chat.js 里绑。会话项自己进 Tab 序（`role="button"`）：
+                       宽屏下它是切换会话的唯一入口。 -->
+                  <div class="chat__session-items" data-role="chat-session-items"></div>
+                </div>
+              </aside>
+
+              <div class="chat__main">
+                <!-- 窄屏的会话条：宽屏 display:none，断点内替换左侧会话栏。 -->
+                <div class="chat__sessionbar">
+                  <select class="select" data-role="chat-session-select" data-i18n-attr="aria-label:chat.sessions.title" aria-label="会话"></select>
+                  <button type="button" class="btn" data-role="chat-new-narrow" data-i18n="chat.sessions.new">新建</button>
+                  <button type="button" class="btn" data-role="chat-delete-narrow" data-i18n="chat.sessions.delete">删除</button>
+                </div>
+
+            <!-- 连接与层级选择（四层；折叠为 CollapsibleSection）：
+                 账号 → 套餐 → 模型 → key 四个下拉收进一个可折叠面板（标题行是
+                 当前组合的摘要，不用展开也能看出发什么），key 说明块随面板体
+                 一起折叠——说明是「展开才需要读」的内容，不该常驻占一截高度。
+                 「空选择」就是不带对应的头 / 字段：账号交给调度器（自动调度），
+                 套餐按策略，模型用服务端默认，key 用面板会话。选了账号，套餐
+                 下拉只剩该账号允许的路由；模型与 key 不联动。非法组合由服务端
+                 报错（400/503），前端不预校验——错误横幅透出服务端消息。
+                 默认收起（`data-collapse-default="closed"`）——聊天时这四层
+                 是配好就不动的设置，展开要占掉 ~150px 高度，而收起时标题行的
+                 摘要（`.chat__settings-summary`）已经把「这次发什么」写在脸上。
+                 需要时就地展开，用户的展开状态由 App.widgets 记在 sessionStorage。 -->
+            <section
+              class="collapse chat__settings"
+              data-collapse="chat-selectors"
+              data-collapse-default="closed"
+              data-collapse-open="false"
+            >
+              <button type="button" class="collapse__head" data-collapse-toggle aria-expanded="false" aria-controls="chat-selectors-body">
+                <svg class="collapse__chevron" aria-hidden="true" focusable="false">
+                  <use href="#icon-chevron-down" />
+                </svg>
+                <h2 class="collapse__title" data-i18n="chat.selectors.title">连接</h2>
+                <span class="collapse__summary chat__settings-summary" data-role="chat-selectors-summary"></span>
+              </button>
+              <div class="collapse__body" id="chat-selectors-body" hidden>
+                <div class="field-grid chat__settings-grid">
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="chat-account" data-i18n="chat.account">账号</label>
+                    <select class="select" id="chat-account" data-role="chat-account"></select>
+                  </div>
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="chat-route" data-i18n="chat.route">套餐</label>
+                    <select class="select" id="chat-route" data-role="chat-route"></select>
+                  </div>
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="chat-model" data-i18n="chat.model">模型</label>
+                    <select class="select" id="chat-model" data-role="chat-model"></select>
+                  </div>
+                  <!-- key 行常驻可见：它是归因工具，不能因为面板会话可用就收起来。
+                       选项 = 面板会话（默认）+ listApiKeys 的条目 + 手动输入。 -->
+                  <div class="field-cell" data-role="chat-key-row">
+                    <label class="field-cell__label" for="chat-key-select" data-i18n="chat.key">API key</label>
+                    <select class="select" id="chat-key-select" data-role="chat-key-select"></select>
+                  </div>
+                  <!-- 手动粘贴（按需展开）：「选已管理 key」不需要它——服务端
+                       存的是加密后的密文，listApiKeys 解密带回，选中即可发。这一行只剩
+                       「手动输入」一个入口（带「记住此 key」勾选），以及 401 后的兑底；
+                       手动粘贴的完整 key 存 localStorage（按 keyId 关联），不勾只在本页
+                       生存期内生效。 -->
+                  <div class="chat__keymanual" data-role="chat-key-manual" hidden>
+                    <input
+                      class="field"
+                      id="chat-key"
+                      type="password"
+                      autocomplete="off"
+                      data-role="chat-key"
+                      data-i18n-attr="placeholder:chat.keyHint"
+                    />
+                    <label class="chat__keyremember">
+                      <input type="checkbox" data-role="chat-key-remember" />
+                      <span data-i18n="chat.keyRemember">记住此 key</span>
+                    </label>
+                    <button type="button" class="btn" data-role="chat-key-apply" data-i18n="chat.keyApply">使用</button>
+                  </div>
+                </div>
+                <div class="hint chat__settings-hint" data-role="chat-key-hint" data-i18n="chat.settingsHint">
+                  「面板会话（默认）」用浏览器登录态发请求，用量记在面板会话上；选了 key 就以它的完整值发 Authorization，用量归因到那把 key。完整 key 只存在这个浏览器里。
+                </div>
+              </div>
+            </section>
+
+            <!-- 对话：消息列表 + 输入区（预览缩略条在输入框
+                 上方，附件按钮 + 多行输入一行；发送/停止在输入框内）。 -->
+            <section class="panel chat__panel fill-chain">
+              <div class="empty" data-role="chat-empty">
+                <span class="empty__title" data-i18n="chat.empty.title">还没有消息</span>
+                <span class="empty__hint" data-i18n="chat.empty.hint">发一条消息试试代理链路。</span>
+              </div>
+              <!-- 消息区不挂 `aria-live`：常驻播报会把每个流式 token 都念一遍，
+                   读屏器被整段回复打断到没完。回复结束由视图往下面的
+                   `chat-done` 写一句（`chat.stream.done`，那才是要给读屏器的那条消息）；
+                   写入时机归 `app-view-chat.js`。 -->
+              <div class="chat__log fill-region" data-role="chat-log"></div>
+              <p class="sr-only" data-role="chat-done" aria-live="polite"></p>
+
+              <form class="chat__composer" data-role="chat-form">
+                <!-- 预览缩略条：待发送的附件芯片，运行时重建。空的时候
+                     整条隐藏（hidden 由视图维护）。 -->
+                <div class="chat__previews" data-role="chat-previews" hidden></div>
+                <input
+                  class="chat__fileinput"
+                  type="file"
+                  multiple
+                  data-role="chat-file-input"
+                  aria-hidden="true"
+                  tabindex="-1"
+                  accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,.cjs,.conf,.cpp,.cs,.css,.csv,.go,.h,.hpp,.html,.ini,.java,.js,.json,.jsx,.log,.md,.mjs,.py,.rs,.sh,.sql,.toml,.ts,.tsx,.txt,.xml,.yaml,.yml"
+                />
+                <div class="chat__inputrow">
+                  <!-- 附件按钮（Lucide paperclip，线性重绘 + muted
+                       常态 hover 亮起）：图片与文本类文件共用一个入口，类型分流
+                       在选择时做——image/* 走视觉链路，文本类读内容注入消息。 -->
+                  <button
+                    type="button"
+                    class="btn btn--icon chat__attach"
+                    data-role="chat-attach"
+                    data-i18n-attr="aria-label:chat.attach,title:chat.attach"
+                    aria-label="附加图片或文件"
+                    title="附加图片或文件"
+                  >
+                    <svg class="btn__icon" aria-hidden="true" focusable="false"><use href="#icon-paperclip" /></svg>
+                  </button>
+                  <!-- 输入框是输入区的框：发送 / 停止贴在它右下角内侧，
+                       状态文案在左下角，两者都不占下一行——发送键单独占
+                       一行、贴在面板最右边时，看着和输入框没关系。 -->
+                  <div class="chat__field">
+                    <textarea
+                      class="field field--area"
+                      data-role="chat-input"
+                      data-i18n-attr="placeholder:chat.inputHint"
+                    ></textarea>
+                    <div class="chat__actions">
+                      <span class="chat__status" data-role="chat-status"></span>
+                      <button type="button" class="btn" data-role="chat-stop" hidden data-i18n="chat.stop">
+                        停止
+                      </button>
+                      <button type="submit" class="btn btn--primary" data-role="chat-send" data-i18n="chat.send">
+                        发送
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </form>
+            </section>
+              </div>
+            </div>
+            </div>
+          </div>

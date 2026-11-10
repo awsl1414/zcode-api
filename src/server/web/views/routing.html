@@ -1,0 +1,185 @@
+          <!-- ③ 路由策略页：order + 分行的调度策略 +
+               队列 / 粘性 / 风控三个折叠区（CollapsibleSection，摘要随表单值联动）
+               + 账号 × 路由矩阵。折叠区的开合状态由 `App.widgets` 持久（跨轮询），
+               视图重渲染后调 `apply()` 投影回新 DOM。 -->
+          <div class="page dense" data-view="routing" hidden>
+            <!-- PageHeader：标题 + 一句说明 + 右侧动作区（本页没有全局动作）。 -->
+            <header class="page-header">
+              <div class="page-header__heading">
+                <h1 class="page-title" data-i18n="nav.routing">路由策略</h1>
+                <p class="page-header__desc" data-i18n="routing.description">定义模型路由、调度与降级策略。</p>
+              </div>
+            </header>
+            <div class="page-body">
+
+            <div class="banner banner--danger" data-role="routing-error" role="alert" hidden>
+              <span data-role="routing-error-text"></span>
+              <span class="toolbar__spacer"></span>
+              <button type="button" class="btn" data-action="dismiss-routing-error" data-i18n="common.close">关闭</button>
+            </div>
+
+            <!-- 整页两列网格。骨架同设置页 `.settings-grid`（2 ×
+                 minmax(0,1fr)、`align-items: start`、≤1024px 单列），只是间距取
+                 `--space-4`（16）：这一页的父容器 `.page-body` 的段落间距就是 16，
+                 行与行、块与块同一拍。配对依据是「左列改主序、右列看兜底」：降级
+                 顺序与账号矩阵横跨整页（前者是竖排优先级列表，后者是宽表，压在
+                 半个宽度里会被挤扁），中间四块两两成对。网格容器自己
+                 `flex: 0 0 auto`：flow 页的 `.page-body` 是 flex 列，flex 子项默认
+                 参与压缩——矩阵面板在 728px 高的视口里被压成 42px（滚动
+                 高度 506px 的整张表溢出到滚动区域外、根本滚不到），根因就是这条。 -->
+            <div class="routing-grid">
+
+            <!-- order：上移 / 下移 / 移除（拖拽还没做，现在用按钮）。
+                 移除 = 把这一档从顺序里拿掉（`setRoutingPolicy` 接受更短的 order，
+                 只留一条时页面先拒：空 order 服务端也会拒）。 -->
+            <section class="panel routing-grid__span">
+              <h2 class="section-title" data-i18n="routing.order.title">降级顺序</h2>
+              <div class="hint" data-i18n="routing.order.hint" data-i18n-attr="title:routing.order.hint">顺序即优先级：第一项最优先；`only` 模式只用第一项。</div>
+              <ol class="order-list" data-role="routing-order"></ol>
+            </section>
+
+            <!-- 调度策略：五个字段排成字段格（两列，标签在上），整列控件左边缘
+                 天然是一条竖线。分组只是排版辅助，字段名自己承担语义。
+                 第五个（落单的那个）跨两列。五个字段填满 2 列会剩一个
+                 左列独占的行，右列空一格看起来像「少了一个字段」；跨列之后每一行
+                 都是满的。 -->
+            <section class="panel">
+              <h2 class="section-title" data-i18n="routing.policy.title">调度策略</h2>
+              <div class="field-grid">
+                <div class="field-cell">
+                  <label class="field-cell__label" for="routing-mode" data-i18n="routing.mode.title">模式</label>
+                  <select class="select" id="routing-mode" data-role="routing-mode"></select>
+                </div>
+                <div class="field-cell">
+                  <label class="field-cell__label" for="routing-strategy" data-i18n="routing.strategy.title">选号策略</label>
+                  <select class="select" id="routing-strategy" data-role="routing-strategy"></select>
+                </div>
+                <div class="field-cell">
+                  <label class="field-cell__label" for="routing-saturated" data-i18n="routing.onSaturated.title">饱和时</label>
+                  <select class="select" id="routing-saturated" data-role="routing-saturated"></select>
+                </div>
+                <div class="field-cell">
+                  <label class="field-cell__label" for="routing-drained" data-i18n="routing.onDrained.title">额度耗尽时</label>
+                  <select class="select" id="routing-drained" data-role="routing-drained"></select>
+                </div>
+                <div class="field-cell field-cell--span">
+                  <label class="field-cell__label" for="routing-authfailed" data-i18n="routing.onAuthFailed.title">重试失败时</label>
+                  <select class="select" id="routing-authfailed" data-role="routing-authfailed"></select>
+                </div>
+              </div>
+              <div class="hint" data-i18n="routing.strategy.hint" data-i18n-attr="title:routing.strategy.hint">均衡 / 轮询会让同一会话在账号间漂移（R10）。</div>
+            </section>
+
+            <!-- 队列三参数（L2）：折叠区，标题行是当前值的摘要（视图层拼）。摘要在
+                 收起时才出现（`.collapse--summary-when-closed`）：展开后数字就在
+                 下面三个输入框里，标题行再复述一遍只是噪声。 -->
+            <section class="collapse collapse--summary-when-closed" data-collapse="routing-queue" data-collapse-open="true">
+              <button type="button" class="collapse__head" data-collapse-toggle aria-expanded="true" aria-controls="routing-queue-body">
+                <svg class="collapse__chevron" aria-hidden="true" focusable="false">
+                  <use href="#icon-chevron-down" />
+                </svg>
+                <h2 class="collapse__title" data-i18n="routing.queue.title">队列</h2>
+                <span class="collapse__summary" data-role="routing-queue-summary"></span>
+              </button>
+              <div class="collapse__body" id="routing-queue-body">
+                <div class="field-grid">
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="routing-queue-timeout" data-i18n="routing.queueTimeoutMs.title">等待上限（毫秒）</label>
+                    <input class="field field--num" id="routing-queue-timeout" type="number" min="0" step="1000" data-role="routing-queueTimeoutMs" />
+                  </div>
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="routing-max-queue" data-i18n="routing.maxQueue.title">队列深度</label>
+                    <input class="field field--num" id="routing-max-queue" type="number" min="0" step="1" data-role="routing-maxQueue" />
+                  </div>
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="routing-max-inflight" data-i18n="routing.maxTotalInflight.title">全局并发上限</label>
+                    <input class="field field--num" id="routing-max-inflight" type="number" min="1" step="1" data-role="routing-maxTotalInflight" />
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <!-- 粘性：同上，折叠区 + 摘要。开关是整组的闸门，横跨两列独占一行；
+                 四个取值字段排成 2×2。 -->
+            <section class="collapse collapse--summary-when-closed" data-collapse="routing-stickiness" data-collapse-open="true">
+              <button type="button" class="collapse__head" data-collapse-toggle aria-expanded="true" aria-controls="routing-stickiness-body">
+                <svg class="collapse__chevron" aria-hidden="true" focusable="false">
+                  <use href="#icon-chevron-down" />
+                </svg>
+                <h2 class="collapse__title" data-i18n="routing.stickiness.title">粘性</h2>
+                <span class="collapse__summary" data-role="routing-stickiness-summary"></span>
+              </button>
+              <div class="collapse__body" id="routing-stickiness-body">
+                <div class="field-grid">
+                  <div class="field-cell field-cell--inline field-cell--span">
+                    <label class="field-cell__label" for="stickiness-enabled" data-i18n="routing.stickiness.enabled">启用粘性</label>
+                    <label class="switch">
+                      <input class="switch__input" id="stickiness-enabled" type="checkbox" data-role="stickiness-enabled" />
+                    </label>
+                  </div>
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="stickiness-ttl" data-i18n="routing.stickiness.ttlSeconds">TTL（秒）</label>
+                    <input class="field field--num" id="stickiness-ttl" type="number" min="0" step="60" data-role="stickiness-ttlSeconds" />
+                  </div>
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="stickiness-max-sessions" data-i18n="routing.stickiness.maxSessions">会话上限</label>
+                    <input class="field field--num" id="stickiness-max-sessions" type="number" min="1" step="1" data-role="stickiness-maxSessions" />
+                  </div>
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="stickiness-saturated" data-i18n="routing.stickiness.onSaturated">饱和时</label>
+                    <select class="select" id="stickiness-saturated" data-role="stickiness-onSaturated"></select>
+                  </div>
+                  <div class="field-cell">
+                    <label class="field-cell__label" for="stickiness-overflow" data-i18n="routing.stickiness.overflowAfterMs">溢出等待（毫秒）</label>
+                    <input class="field field--num" id="stickiness-overflow" type="number" min="0" step="500" data-role="stickiness-overflowAfterMs" />
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <!-- 风控开关（L2 / L3）：折叠区 + 摘要（心跳抖动：开 / 关）。 -->
+            <section class="collapse collapse--summary-when-closed" data-collapse="routing-risk" data-collapse-open="true">
+              <button type="button" class="collapse__head" data-collapse-toggle aria-expanded="true" aria-controls="routing-risk-body">
+                <svg class="collapse__chevron" aria-hidden="true" focusable="false">
+                  <use href="#icon-chevron-down" />
+                </svg>
+                <h2 class="collapse__title" data-i18n="routing.risk.title">风控</h2>
+                <span class="collapse__summary" data-role="routing-risk-summary"></span>
+              </button>
+              <div class="collapse__body" id="routing-risk-body">
+                <div class="field-grid">
+                  <div class="field-cell field-cell--inline field-cell--span">
+                    <label class="field-cell__label" for="risk-jitter" data-i18n="routing.risk.jitterHeartbeat">心跳抖动</label>
+                    <label class="switch">
+                      <input class="switch__input" id="risk-jitter" type="checkbox" data-role="risk-jitterHeartbeat" />
+                    </label>
+                    <div class="hint" data-i18n="routing.risk.jitterHeartbeat.hint" data-i18n-attr="title:routing.risk.jitterHeartbeat.hint">按账号错峰并叠加抖动；关掉只给排障用。</div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <!-- 账号 × 路由矩阵：账号身份来自账号摘要，✓/— 派生自各账号的 routes，只读 -->
+            <section class="panel routing-grid__span">
+              <h2 class="section-title" data-i18n="routing.matrix.title">账号 × 路由矩阵</h2>
+              <div class="hint" data-i18n="routing.matrix.hint">账号与账号类型取自账号摘要，✓/— 派生自各账号的 routes；只读。</div>
+              <table class="table matrix" data-role="routing-matrix">
+                <caption class="table__caption" data-i18n="routing.matrix.title">账号 × 路由矩阵</caption>
+                <thead data-role="routing-matrix-head"></thead>
+                <tbody data-role="routing-matrix-body"></tbody>
+              </table>
+              <div class="empty" data-role="routing-matrix-empty" hidden data-i18n="routing.matrix.empty">还没有账号。</div>
+            </section>
+
+            </div>
+
+            <!-- 路由熔断观测。放在两列网格**之外**：它是一条
+                 页级状态条，不参与两列网格的「降级顺序 / 矩阵跨列 + 四块两两配对」；
+                 熔断是路由级状态，与账号 × 路由矩阵的 ✓/— 单元格正交。 -->
+            <section class="panel" data-role="routing-breaker-panel" hidden>
+              <h2 class="section-title" data-i18n="routing.breaker.title">路由熔断</h2>
+              <div data-role="routing-breaker-list"></div>
+            </section>
+
+            </div>
+          </div>

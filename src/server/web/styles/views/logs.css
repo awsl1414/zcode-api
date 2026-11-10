@@ -1,0 +1,537 @@
+/* ------------------------------------------------------------------------- */
+/* 日志流（日志正文保持等宽字体）                                              */
+/* ------------------------------------------------------------------------- */
+
+/* 与骨架图的设计意图对齐：等宽、一行一条、超出滚动。字号用 `--text-meta`
+   （不新增档位），行高沿用全局 `--leading`。
+
+   日志页是 fill 模式，这一块就是那个 `.fill-region`（页面上的
+   `class="log fill-region"`）——吃掉面板剩下的全部高度并自己滚。不设
+   固定视口高度：固定视口在高窗口下留一大块空白，矮窗口下又要多滚一层。
+
+   `flex: 1 1 auto` / `min-height: 0` 在这里再写一遍，是刻意的**双保险**
+   ——高度接力已经由 `.fill-region` 给了，但「日志框占满面板」是这一页的定义性
+   行为（用户实测的回归就是框只占半页），它不该在有人删掉一个 role class 时
+   悄悄消失。实测（1288×876 视口）：page-body 725 / 框体 620 / 滚动块 578，
+   三者首尾相接，页面本身不出现滚动条。 */
+.log {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-meta);
+  line-height: var(--leading);
+}
+
+/* 一行日志：保留原文的空白（对齐的表格日志不能把空格吃掉），但允许长行折行，
+   一个不折的长行会把整页横向撑开，比折行更难读。正文色用 muted（INFO
+   弱化）：日志墙的常态是 info，warn / error 的语义色只有压过它才看得出来。 */
+.log__line {
+  padding: 0 var(--space-2);
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* 没有结构化条目的行（历史行 / console tee 的残余）：整段原文一段。
+
+   **续行缩进**：`.log__row` 里的正文本来就从第 4 列开始，折行后自然
+   对齐；整段文本没有那一列，续行会顶到行首、和上一行分不清谁是谁的后半段。
+   悬挂缩进（负 `text-indent` + 同值左内边距）让首行不动、续行缩进一个词距。 */
+.log__line--plain {
+  padding-left: calc(var(--space-2) + var(--space-4));
+  text-indent: calc(var(--space-4) * -1);
+}
+
+.log__line:last-child {
+  border-bottom: 0;
+}
+
+/* 级别配色走语义色：错误 = danger，警告 = warn，普通行用弱化色。
+   深色下这几个 token 自己翻转，组件不用改。 */
+.log__line--warn {
+  color: var(--warn);
+}
+
+.log__line--error {
+  color: var(--danger);
+}
+
+/*
+ * 结构化条目的四列：时间 / 级别 / 模块 / 正文。字段来自条目本身，
+ * 前端不再猜；没有条目的行（历史行、console tee 的残余）不走这里。
+ * 时间列 tabular 数字对齐，模块弱化，正文拿走剩余宽度。
+ */
+.log__row {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.log__time {
+  flex: 0 0 8ch;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.log__level {
+  flex: 0 0 5ch;
+  font-weight: var(--weight-strong);
+}
+
+.log__level--warn {
+  color: var(--warn);
+}
+
+.log__level--error {
+  color: var(--danger);
+}
+
+.log__level--info,
+.log__level--debug {
+  color: var(--muted);
+}
+
+.log__mod {
+  flex: 0 0 auto;
+  color: var(--faint);
+}
+
+.log__msg {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/*
+ * 键值对分段：「信噪比」的那一半。
+ *
+ * `claim tick account=work-team message="claim: hold 300s — …"` 这种行里，真正在
+ * 变的部分只有值；键每次都一样。把键压成第三层文字（faint）、值提到正文色，
+ * 一眼扫过去看到的就是「哪个账号、什么原因」，而不是一串等号。
+ *
+ * 分段由 `app-view-logs.js::appendSegments` 生成，只作用在结构化条目的正文上：
+ * 没有条目的历史行是整段原文，拆开来看不出更多东西。
+ */
+.log__kv--key {
+  color: var(--faint);
+}
+
+.log__kv--val {
+  color: var(--text);
+}
+
+/*
+ * 重复行折叠的徽章与可点击的组：连续相同内容只显示一行 + ×N。
+ * 徽章是计数，不是状态，所以不用 `.status-badge`（那是字段级语义标注）：
+ * 一个浅边的等宽小片就够。折叠只影响显示，点击展开整组。
+ */
+.log__line--repeat {
+  cursor: pointer;
+}
+
+.log__repeat {
+  margin-left: var(--space-2);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--warn);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 请求事件表的外层滚动区：表格自己不能当滚动容器（`display: block`
+   会毁掉列宽），所以由它同时接管横向（十四列在窄屏会超宽）与纵向（行数上限
+   200，fill 模式下不再把页面顶长）。写法与 `.panel:has(> .table)`（用于非 fill
+   页面的横向溢出）同一条取舍：滚动发生在框里，页面不出现滚动条。 */
+.table-scroll {
+  overflow: auto;
+}
+
+/*
+ * 日志页的两个框体（HTML 上是 `class="panel fill-chain log-panel"`）：
+ * 框体只负责边界与内边距，里面那块（`.log` / `.table-scroll`）才是滚动区。
+ *
+ * 框体必须是 flex 列：`flex: 1 1 auto` 落在块级子元素上是无效的，日志行一多
+ * `.log` 会按内容长高并冲出框体（页面已经不滚，溢出部分会被 page-body 裁掉）。
+ */
+.log-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* 空态（验收反馈）：日志框只剩空态提示时垂直居中，与聊天空态同一条规则。 */
+.log-panel:has(> .empty:only-child) {
+  justify-content: center;
+}
+
+/* 聊天空态（验收反馈）：`.chat__panel` 的三个孩子是「空态 / 消息区 / 输入区」。
+   空态可见时它占据消息区的剩余高度并把虚线框居中——空态贴顶、底下留一大块
+   空白时，看起来像内容被裁掉了。有消息时空态 `hidden`，规则自动失效。
+   （`:has` 是现代浏览器基线，AGENTS 已钉） */
+.chat__panel:has(> .empty:not([hidden])) > .empty {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+/* ------------------------------------------------------------------------- */
+/* 日志页 · 请求事件表（对标请求日志参考稿，十四列）：表格 + 行内展开的
+   阶段时间线；状态列用 StatusBadge，`--pending`
+   是进行中琥珀的变体，既有语义不动。
+
+   重试列的口径：只在 `upstreamAttempts > 1` 时有值（×3），其余是 `-`。
+   次数是事实，不用警示色——打上游三次最后成功 200 不需要告警。 */
+/* ------------------------------------------------------------------------- */
+
+/* 整行可点（与概览页的账号摘要同一口径：鼠标形状看得出来）。*/
+.req__row {
+  cursor: pointer;
+}
+
+/* 失败的请求行：reqId 用 danger 作行内标识——状态格的徽章自己已经带语义色，
+   错误列也是 danger，不再给整行染红（danger 系留给失败）。
+
+   客户端断开（`clientAborted`）的行走 `--aborted`，不染红——那不是我方
+   或上游真失败，把 reqId 染红会让「grep 到的失败」里混进一整类自断。 */
+.req__row--error .req__id {
+  color: var(--danger);
+}
+
+.req__row--aborted .req__id {
+  color: var(--muted);
+}
+
+/* 「加载更早」行：整行一颗按钮；hidden 属性管收起。这颗按钮跨全部列的
+   `colspan` 单元格，横向居中仍走表格基础规则（单元格文本全项目居中），
+   这里只收纵向距离。 */
+.req__history td {
+  padding: var(--space-2) 0;
+}
+
+/* reqId 与 key 列是标识符，不是词：等宽字体让 `#mw7223-053` 这样的前缀一眼可辨。 */
+.req__id,
+.req__key {
+  font-family: var(--font-mono);
+}
+
+.req__key {
+  color: var(--muted);
+}
+
+/*
+ * 请求 / 来源列（由「路由 / 协议」「账号」两列合并而来）：
+ *
+ *   请求：两行——上面是流式/批量与它落在哪条路由，下面是这次真正打的端点路径
+ *         （`record.upstreamUrl` 的 path，回退 `-`）。路由与协议原先是两列，合进
+ *         这里省下一列；协议在展开头里仍然写着。
+ *   来源：账号名 + 一个色点。色点用身份盘 `--identity-*`（tokens.css），按账号名
+ *         确定性取模——同一个账号永远是同一个颜色，刷新与重连都不漂。
+ */
+.req__req-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+
+/* 流式 / 批量：形态标识，不用语义色（它不是状态）。*/
+.req__req-mode {
+  color: var(--muted);
+  font-size: var(--text-micro);
+}
+
+.req__req-mode--stream {
+  color: var(--accent);
+}
+
+.req__req-route {
+  color: var(--faint);
+  font-size: var(--text-micro);
+}
+
+/* 端点路径：技术标识，等宽小字；超宽截断（完整值在展开行的 upstream 一项）。*/
+.req__req-path {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: var(--text-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.req__source {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+
+/*
+ * 时间列与速率列：两列都是「一列同量纲的数字」，等宽数字才比得出来。
+ * 时间列（HH:MM:SS）之前是裸 `<td>`，速率列（12.5 / -）之前也没有类。
+ * 字号与内边距不动：密集表的口径只有 `.table--dense` 一个钩子。
+ */
+.req__time,
+.req__tps {
+  font-variant-numeric: tabular-nums;
+}
+
+.req__tps {
+  color: var(--muted);
+}
+
+.req__source-dot {
+  flex: 0 0 auto;
+  width: var(--space-2);
+  height: var(--space-2);
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.req__source-dot--1 {
+  background: var(--identity-1);
+}
+
+.req__source-dot--2 {
+  background: var(--identity-2);
+}
+
+.req__source-dot--3 {
+  background: var(--identity-3);
+}
+
+.req__source-dot--4 {
+  background: var(--identity-4);
+}
+
+.req__source-dot--5 {
+  background: var(--identity-5);
+}
+
+.req__source-dot--6 {
+  background: var(--identity-6);
+}
+
+/*
+ * 缓存列：命中率一行 + 命中/写入一行。
+ *
+ * 分母口径与统计页 / `usage-stats.ts` 的 `cacheHit` 同一份：read ÷ (read +
+ * creation)。不拿 inputTokens 当分母——上游把命中部分单列在 `cacheReadTokens`
+ * 里时，`inputTokens` 的口径各协议不一致，混在一起算会让命中率随协议漂。
+ */
+.req__cache-rate {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.req__cache-split {
+  color: var(--faint);
+  font-size: var(--text-micro);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/*
+ * 推理强度：四档一枚小片。颜色按「要了多少思考」递增（关 = faint、低 =
+ * muted、中 = text、高 = accent）；用主题色深浅而不是语义色——强度是偏好不是
+ * 好坏，语义色只说明状态。
+ *
+ * 高度走 `--tag-height`：它是一枚标签（与 `.tag` 同族），靠行盒凑出的
+ * 21.5px 与旁边 22px 的 `.tag` 差半个像素。
+ */
+.req__effort {
+  display: inline-flex;
+  align-items: center;
+  height: var(--tag-height);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-micro);
+  white-space: nowrap;
+}
+
+.req__effort--none {
+  color: var(--faint);
+}
+
+.req__effort--low {
+  color: var(--muted);
+}
+
+.req__effort--medium {
+  color: var(--text);
+}
+
+.req__effort--high {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+/* 客户端断开：与上游失败分开的标记。用 muted 而不是 danger——
+   这条记录失败的原因在我们这侧断开，不是上游拒了。 */
+.req__aborted {
+  color: var(--muted);
+  font-size: var(--text-micro);
+  white-space: nowrap;
+}
+
+.req__aborted::before {
+  content: "⊘ ";
+}
+
+/* 用时列的两行：总用时大字、首响小字；数字 tabular 对齐，秒数扫得快。 */
+.req__ms-main {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.req__ms-sub {
+  color: var(--faint);
+  font-size: var(--text-micro);
+  font-variant-numeric: tabular-nums;
+}
+
+/* tokens 列的两行：↑ 产出、↓ 输入，≥1000 走 App.format.compact 缩写。 */
+.req__tok {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.req__tok--in {
+  color: var(--muted);
+}
+
+/* 错误列：用户词来自 `errorCode`，原文 detail 在 title / 展开行里。 */
+.req__error {
+  max-width: 24ch;
+  overflow: hidden;
+  color: var(--danger);
+  text-overflow: ellipsis;
+}
+
+/* 同一格的第二行：怎么办（hint）。限宽与提示文字一致，颜色降一层不与用户词争重。 */
+.req__error-hint {
+  max-width: 24ch;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: var(--text-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 展开行的元信息：key 归因 / 上游地址 / 换号 / 请求体，一项一对 k: v，可折行。 */
+.req__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-5);
+  padding: var(--space-1) var(--space-2);
+}
+
+.req__meta-item {
+  color: var(--muted);
+  font-size: var(--text-micro);
+}
+
+.req__meta-k {
+  color: var(--faint);
+}
+
+.req__meta-v {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+/* 转储提示：完整报文在 dump 文件里，一句话指路，不占展开行的主体。 */
+.req__dump-hint {
+  flex: 1 1 100%;
+  color: var(--faint);
+  font-size: var(--text-micro);
+}
+
+/* 展开行：跨全部七列的合并单元格，背景与账号详情行同款（panel-alt）。*/
+.req__detail {
+  background: var(--panel-alt);
+}
+
+/* 展开头的首行：reqId 开头，段与段之间一个间隔号，与终端表格同一套信息。 */
+.req__detail-head {
+  padding: var(--space-1) var(--space-2);
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+/* 阶段时间线的一行：✓/✗ + 阶段名 + 相对时刻 + 字段摘要，四段都是等宽字体，
+   阶段名列定宽对齐（与请求事件表的列式排版一致）。 */
+.req__stage {
+  display: flex;
+  gap: var(--space-4);
+  padding: var(--space-1) var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  color: var(--text);
+}
+
+.req__stage-mark {
+  flex: 0 0 auto;
+}
+
+.req__stage-name {
+  flex: 0 0 12ch;
+}
+
+.req__stage-at {
+  flex: 0 0 7ch;
+  text-align: right;
+  color: var(--muted);
+  /* 展开行里的阶段时间线是等宽字体的「列式排版」（阶段名与时刻各占固定 ch），
+     右对齐让同一列的毫秒数在纵向可比；它不是表格单元格，不受表头/单元格
+     全项目居中那条契约约束。 */
+  font-variant-numeric: tabular-nums;
+}
+
+.req__stage-detail {
+  color: var(--muted);
+  word-break: break-word;
+}
+
+/* 失败阶段（failedStage）与末尾的错误行：danger 系。 */
+.req__stage--error {
+  color: var(--danger);
+}
+
+.req__stage--error .req__stage-detail,
+.req__stage--error .req__stage-at {
+  color: var(--danger);
+}
+
+/*
+ * 十四列在 ≤1440 折叠三列：缓存 / 推理强度 / 重试 进展开行。
+ *
+ * 为什么是这三列：它们都是「排障时才看、扫表时不看」的列（缓存命中率是口径问题，
+ * 推理强度与重试是「这一轮为什么要了这么多思考 / 打了几次上游」）。折叠后表格回到
+ * 十一列，1440 窗口不再出现横向滚动条（十四列实测约 1500px，差的那三列正好是一百
+ * 多像素）。1440 以上的宽屏仍是十四列，什么都不少。
+ *
+ * 折叠不是丢信息：三列的值在展开行（`.req__meta`）里逐项给出，与「表格列
+ * 装不下的字段」放进展开行是同一套机制——行点击本来就是这张表的主交互。
+ */
+@media (max-width: 1440px) {
+  .table--dense .req__col--extra {
+    display: none;
+  }
+
+  /*
+   * 错误列跟着收一档：24ch 是宽屏的预算，十一列在 1440 的窗口里还差
+   * 六十来像素。用户词 / hint 两行同宽收窄，完整 hint 与 detail 在
+   * 展开行和 title 里。
+   */
+  .table--dense .req__error,
+  .table--dense .req__error-hint {
+    max-width: 16ch;
+  }
+}

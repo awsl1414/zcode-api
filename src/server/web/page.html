@@ -1,0 +1,414 @@
+<!doctype html>
+<!--
+  page.html — 页面骨架（壳 + 侧边栏）。
+
+  这里**只组合组件**，不写任何视觉样式：颜色、字号、圆角、间距全在 tokens.css，
+  组件尺寸全在 components.css。唯一允许出现在页面里的 `style` 是纯几何
+  （width / flex / grid-template），本页只用了几处 `grid-template-columns`。
+
+  服务端拼装（`src/server/web/page.ts`）会替换五个占位：
+    THEME-BOOT    首屏防闪烁内联脚本，必须留在 head 最前面
+    TOKENS        tokens.css（只放 :root 变量）
+    COMPONENTS    components.css（只放组件类）
+    I18N          zh.json / en.json 两套字典（script type="application/json"）
+    APP           运行时（多个文件按依赖顺序拼接，见 page.ts 的 APP_MODULES）
+
+  样式块里用 HTML 注释占位（style 的内容是 raw text，对分词器无影响）；
+  两个 script 块里用 JS 注释占位：script 里的「<!」会把分词器推进 script data
+  escaped 状态，占位符必须对 HTML 分词器完全透明。
+
+  文案一律走 `data-i18n`（文本）与 `data-i18n-attr="attr:key"`（属性），默认写中文。
+  中文是术语表的基准语言，也是「缺键回退原文」时露出的原文。
+
+  所有页面用同一份 HTML（单套 HTML，不生成两套页面）：`panel.ts` 把 `/`、
+  `/panel`、`/stats`、`/accounts`、`/routing`、`/keys`、`/logs`、`/settings`
+  都映射到本文档，`app.js` 按 `location.pathname` 决定显示哪个 `[data-view]` 容器、给哪个
+  导航项加选中态。这样切页是整页导航（无需前端路由库），但只有一份模板、一套字典。
+  代理是例外：它没有路径也没有视图，是账号页抽屉里的字典表。
+-->
+<!-- 应用壳：`html.app-root` 把整页固定成视口高度、关掉文档流滚动，
+  滚动只发生在各视图的 `.page-body` 里（登录页不带这个类，仍是文档流）。 -->
+<html lang="zh-CN" class="app-root">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>ZCode Proxy · 控制面</title>
+    <script>
+      <!-- THEME-BOOT -->
+    </script>
+    <style>
+      <!-- TOKENS -->
+    </style>
+    <style>
+      <!-- COMPONENTS -->
+    </style>
+  </head>
+  <body>
+    <!-- 图标精灵：七个导航图标（外加设置分组、折叠、刷新等非导航图标）的 path
+         数据只在这里出现一次，导航项用 `use` 指向下面这些 symbol。为什么不是每个
+         `<a>` 里写一份完整 SVG：同样的外壳（viewBox / fill / stroke / linecap…）
+         改一次要改多处。图标取自 Lucide（https://lucide.dev，MIT 许可），
+         24×24 viewBox，`stroke-width: 2` 与圆角线端是 Lucide 的默认笔触。 -->
+    <svg class="icon-sprite" aria-hidden="true" focusable="false">
+      <symbol id="icon-layout-grid" viewBox="0 0 24 24">
+        <rect x="3" y="3" width="7" height="7" rx="1" />
+        <rect x="14" y="3" width="7" height="7" rx="1" />
+        <rect x="3" y="14" width="7" height="7" rx="1" />
+        <rect x="14" y="14" width="7" height="7" rx="1" />
+      </symbol>
+      <symbol id="icon-scroll-text" viewBox="0 0 24 24">
+        <path d="M15 12h-5" />
+        <path d="M15 8h-5" />
+        <path d="M19 17V5a2 2 0 0 0-2-2H4" />
+        <path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3" />
+      </symbol>
+      <symbol id="icon-users" viewBox="0 0 24 24">
+        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+      </symbol>
+      <symbol id="icon-git-branch" viewBox="0 0 24 24">
+        <line x1="6" x2="6" y1="3" y2="15" />
+        <circle cx="18" cy="6" r="3" />
+        <circle cx="6" cy="18" r="3" />
+        <path d="M18 9a9 9 0 0 1-9 9" />
+      </symbol>
+      <symbol id="icon-key-round" viewBox="0 0 24 24">
+        <path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z" />
+        <circle cx="16.5" cy="7.5" r=".5" fill="currentColor" />
+      </symbol>
+      <symbol id="icon-settings" viewBox="0 0 24 24">
+        <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+        <circle cx="12" cy="12" r="3" />
+      </symbol>
+      <symbol id="icon-circle-user-round" viewBox="0 0 24 24">
+        <path d="M18 20a6 6 0 0 0-12 0" />
+        <circle cx="12" cy="10" r="4" />
+        <circle cx="12" cy="12" r="10" />
+      </symbol>
+      <!-- 侧边栏「聊天」（Lucide message-square）。聊天是侧边栏里的一个视图，
+           没有独立页。 -->
+      <symbol id="icon-message-square" viewBox="0 0 24 24">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+      </symbol>
+      <!-- 侧边栏「统计」（Lucide chart-column）。用量报表页
+           （getUsageStats）的入口，位置紧跟概览。 -->
+      <symbol id="icon-chart-column" viewBox="0 0 24 24">
+        <path d="M3 3v18h18" />
+        <path d="M18 17V9" />
+        <path d="M13 17V5" />
+        <path d="M8 17v-3" />
+      </symbol>
+      <!-- 设置分组标题（连接 / 子系统 / 服务）与折叠头用的
+           Lucide 图标。身份与账户组共用上面的 circle-user-round。 -->
+      <symbol id="icon-link" viewBox="0 0 24 24">
+        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+      </symbol>
+      <symbol id="icon-layers" viewBox="0 0 24 24">
+        <path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z" />
+        <path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65" />
+        <path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65" />
+      </symbol>
+      <symbol id="icon-server" viewBox="0 0 24 24">
+        <rect width="20" height="8" x="2" y="2" rx="2" ry="2" />
+        <rect width="20" height="8" x="2" y="14" rx="2" ry="2" />
+        <line x1="6" x2="6.01" y1="6" y2="6" />
+        <line x1="6" x2="6.01" y1="18" y2="18" />
+      </symbol>
+      <symbol id="icon-chevron-down" viewBox="0 0 24 24">
+        <path d="m6 9 6 6 6-6" />
+      </symbol>
+      <!-- 顶栏刷新（Lucide refresh-cw）。四笔：两段弧 + 两个箭头拐角，
+           与主题图标同一套线性画法（fill: none / stroke 2 / 圆角线端，尺寸沿用
+           `--layout-icon`）。刷新是一颗动作图标，不是第二套品牌图形。 -->
+      <symbol id="icon-refresh-cw" viewBox="0 0 24 24">
+        <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+        <path d="M21 3v5h-5" />
+        <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+        <path d="M8 16H3v5" />
+      </symbol>
+      <!-- 顶栏主题按钮的三态图标（Lucide sun / moon / monitor）。
+           按钮一次只显示当前态的那一颗（`use` 的 href 由 app-theme.js 写），
+           点击在跟随系统 → 浅色 → 深色之间循环。 -->
+      <symbol id="icon-sun" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2" />
+        <path d="M12 20v2" />
+        <path d="m4.93 4.93 1.41 1.41" />
+        <path d="m17.66 17.66 1.41 1.41" />
+        <path d="M2 12h2" />
+        <path d="M20 12h2" />
+        <path d="m6.34 17.66-1.41 1.41" />
+        <path d="m19.07 4.93-1.41 1.41" />
+      </symbol>
+      <symbol id="icon-moon" viewBox="0 0 24 24">
+        <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+      </symbol>
+      <symbol id="icon-monitor" viewBox="0 0 24 24">
+        <rect width="20" height="14" x="2" y="3" rx="2" />
+        <line x1="8" x2="16" y1="21" y2="21" />
+        <line x1="12" x2="12" y1="17" y2="21" />
+      </symbol>
+      <!-- 概览 claim 行整卡可点后的行尾箭头（Lucide arrow-right）。 -->
+      <symbol id="icon-arrow-right" viewBox="0 0 24 24">
+        <path d="M5 12h14" />
+        <path d="m12 5 7 7-7 7" />
+      </symbol>
+      <!-- 聊天附件（Lucide）。paperclip 是输入区的附件按钮；image /
+           file-text 是图片 / 文件两种附件芯片的占位与气泡内图标。 -->
+      <symbol id="icon-paperclip" viewBox="0 0 24 24">
+        <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+      </symbol>
+      <!-- 聊天会话栏「新建」按钮（Lucide plus）——整宽长方形按钮里
+           居中一个加号，与会话列表项等宽等距。 -->
+      <symbol id="icon-plus" viewBox="0 0 24 24">
+        <path d="M5 12h14" />
+        <path d="M12 5v14" />
+      </symbol>
+      <symbol id="icon-image" viewBox="0 0 24 24">
+        <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+        <circle cx="9" cy="9" r="2" />
+        <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+      </symbol>
+      <symbol id="icon-file-text" viewBox="0 0 24 24">
+        <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+        <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+        <path d="M10 9H8" />
+        <path d="M16 13H8" />
+        <path d="M16 17H8" />
+      </symbol>
+      <!-- 侧边栏折叠按钮的两态（Lucide panel-left-close /
+           panel-left-open）。两颗图标只差左边两条斜笔的方向（`m9 18 6-6-6-6`
+           与它的反向），其余三笔完全相同——那是「往里收 / 往外放」的方向，
+           按钮一次只画当前动作的那颗（`use` 的 href 由 app-sidebar.js 同步）。 -->
+      <symbol id="icon-panel-left-close" viewBox="0 0 24 24">
+        <rect width="18" height="18" x="3" y="3" rx="2" />
+        <path d="M9 3v18" />
+        <path d="m16 15-3-3 3-3" />
+      </symbol>
+      <symbol id="icon-panel-left-open" viewBox="0 0 24 24">
+        <rect width="18" height="18" x="3" y="3" rx="2" />
+        <path d="M9 3v18" />
+        <path d="m14 9 3 3-3 3" />
+      </symbol>
+    </svg>
+
+    <div class="app">
+      <!-- 顶栏的职责：品牌、视图动作与本机偏好。
+
+           品牌只有图标 + 名字：侧边栏第一项就是「概览」，顶栏再说一遍「ZCode 控制面」
+           既重复又吃掉 108px，英文标签还要再多三成。
+
+           运行状态在侧边栏底部（`.sidebar__status`），不占顶栏：它是环境信息，
+           属那一栏的脚注。圆点不表示「运行 / 停止」：能看到这一页就说明网关在跑，
+           那个状态永远是同一个值。它显示健康——有风控告警时转 warn，`title` 里列出告警。
+
+           启停代理的入口不在这里，也不在这个进程里：停服务用 Ctrl+C /
+           docker stop，让整个程序退出用设置页的「退出进程」。 -->
+      <!-- 左 = 品牌（自绘 ZCode 图标 + 名字，指回概览）；右 = 主题 +
+           语言两只下拉（本机偏好，localStorage）。聊天入口不在顶栏——它是侧边栏
+           的一个视图切换项，顶栏再放一个入口是同一个动作的两个按钮。
+
+           品牌图形是内联 SVG 而不是精灵 `<use>`：它有两层各异的填色（方块
+           --accent、笔画 --on-accent），需要直接由页面 CSS 按 class 上色；
+           `<use>` 的影子树接不到外部选择器。绘制约定见 components.css 的
+           .brand-mark__* 注释。 -->
+      <header class="appbar">
+        <!-- 侧边栏折叠：顶栏最左边、品牌图标旁。
+
+             为什么按钮在这里而不在侧边栏里：收起之后侧边栏只剩 56px 的图标列，
+             把「展开」按钮放进去就会和八个导航项抢那一列的视觉节奏（它会看起来
+             像第九个导航项）。放在顶栏左上角，它是「窗格」层级的东西，与品牌
+             同位——展开态下点它往里收，收起态下点它往外放，位置不动。
+
+             图标两态（panel-left-close / panel-left-open）与 title / aria-label
+             由 app-sidebar.js 写；`aria-expanded` 表达的是它控制的那块
+             （侧边栏）当前展没展开。 -->
+        <button
+          type="button"
+          class="btn btn--icon appbar__sidebar-toggle"
+          id="appbar-sidebar"
+          data-role="sidebar-toggle"
+          aria-controls="sidebar"
+          aria-expanded="true"
+          data-i18n-attr="aria-label:sidebar.collapse,title:sidebar.collapse"
+        >
+          <svg class="appbar__sidebar-icon" aria-hidden="true" focusable="false">
+            <use data-role="sidebar-icon" href="#icon-panel-left-close" />
+          </svg>
+        </button>
+        <a class="appbar__brand" href="/">
+          <svg class="appbar__logo" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <rect class="brand-mark__tile" x="1" y="1" width="22" height="22" rx="6" />
+            <path class="brand-mark__glyph" d="M7.5 8h9l-9 8h9" />
+          </svg>
+          <span class="appbar__brand-name" data-i18n="app.brand">ZCode</span>
+        </a>
+        <!-- 动作结果行（目前只有设置页的「退出进程」写它）。刻意不挂在页内横幅上：
+             那条路径上进程随即消失，页面已经等不到下一次轮询来刷新横幅，这一行
+             是当场就能读到的那句说明。 -->
+        <span class="appbar__note" data-role="appbar-note" hidden></span>
+        <span class="appbar__spacer"></span>
+        <!-- 刷新：顶栏右侧的**视图动作**——语义是「刷新当前视图的数据」，
+             按 `state.activeView` 派发各自的取数（映射表在 app-refresh.js）。
+             页面内分散的刷新入口（统计页范围栏的「刷新」、设置页页头的「重新读取」）
+             随这一颗按钮收敛掉：一个动作只留一个入口。
+
+             图标 refresh-cw 与主题图标同一颗 18px（`--layout-icon`）/ 2px 描边；
+             在途时转圈（.appbar__refresh-icon--spinning），完成后 800ms 复位。
+             disabled 与 title / aria-label 由 app-refresh.js 按当前视图写：没有
+             服务端数据的视图（聊天、日志的系统 tab）置灰并说明「无需刷新」。 -->
+        <div class="appbar__actions">
+          <button
+            type="button"
+            class="btn btn--icon"
+            id="appbar-refresh"
+            data-role="refresh-button"
+            data-i18n-attr="aria-label:refresh.title,title:refresh.title"
+          >
+            <svg class="appbar__refresh-icon" aria-hidden="true" focusable="false">
+              <use data-role="refresh-icon" href="#icon-refresh-cw" />
+            </svg>
+          </button>
+        </div>
+        <div class="appbar__prefs">
+          <!-- 主题：图标按钮，点击在「跟随系统 → 浅色 → 深色」
+               之间循环。按钮里只画当前态的那颗图标（sun / moon / monitor，精灵
+               引用），`use` 的 href 与 title / aria-label 由 app-theme.js 同步——
+               title 提示当前态（如「主题 · 跟随系统」），静态的 data-i18n-attr
+               是字典缺失时的兑底名字。语言下拉保持不变：两颗偏好里只有主题是
+               三态循环。 -->
+          <button
+            type="button"
+            class="btn btn--icon"
+            id="appbar-theme"
+            data-role="theme-button"
+            data-i18n-attr="aria-label:prefs.theme"
+          >
+            <svg class="appbar__theme-icon" aria-hidden="true" focusable="false">
+              <use data-role="theme-icon" href="#icon-monitor" />
+            </svg>
+          </button>
+          <select
+            class="select"
+            id="appbar-lang"
+            data-role="lang-select"
+            data-i18n-attr="aria-label:prefs.language,title:prefs.language"
+          >
+            <option value="zh">中文</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+      </header>
+
+      <div class="app__body">
+        <!-- 侧边栏：八项平铺，按使用频率排序。
+             分组标题在 232px 宽的栏里各占一行，三行标题换来的是「概览 / 日志」这种
+             两项一组，读者还是得逐项读，反而多了一层要跳过的噪音。顺序本身就是分组：
+             每天看的在最上，出问题才看的在最下。
+             每个导航项配一个 20×20 图标（`--layout-icon`），图标是装饰：
+             旁边有文字，所以 `aria-hidden`，颜色跟 `currentColor` 走（选中态
+             把文字变 `--accent`，图标自己就跟着变）。
+             「我的账户」不在导航里：并进设置页的「账户」组。
+             代理也不在导航里：它是账号属性的命名字典，管理面是账号页的抽屉。 -->
+        <nav class="sidebar" id="sidebar">
+          <a class="nav" href="/" data-nav="overview">
+            <svg class="nav__icon" aria-hidden="true" focusable="false">
+              <use href="#icon-layout-grid" />
+            </svg>
+            <span data-i18n="nav.overview">概览</span>
+          </a>
+          <!-- 统计：用量报表页（getUsageStats），概览页今日卡与时序缩略的
+               跳转落点。位置紧跟概览：两者回答的是同一件事的两个时间尺度
+               （「现在怎么样」与「过去用了多少」），都是每天要看的。 -->
+          <a class="nav" href="/stats" data-nav="stats">
+            <svg class="nav__icon" aria-hidden="true" focusable="false">
+              <use href="#icon-chart-column" />
+            </svg>
+            <span data-i18n="nav.stats">统计</span>
+          </a>
+          <!-- 聊天（「使用面与管理面分离」翻转成面板的一个视图）。
+               它没有路径，所以不是链接而是按钮：点击客户端直切（`switchToChat`），
+               浏览器回退可回到切之前的视图。位置紧跟概览：两者都是每天要用的。 -->
+          <button type="button" class="nav" data-nav="chat" data-action="show-chat">
+            <svg class="nav__icon" aria-hidden="true" focusable="false">
+              <use href="#icon-message-square" />
+            </svg>
+            <span data-i18n="nav.chat">聊天</span>
+          </button>
+          <a class="nav" href="/accounts" data-nav="accounts">
+            <svg class="nav__icon" aria-hidden="true" focusable="false">
+              <use href="#icon-users" />
+            </svg>
+            <span data-i18n="nav.accounts">账号</span>
+          </a>
+          <a class="nav" href="/routing" data-nav="routing">
+            <svg class="nav__icon" aria-hidden="true" focusable="false">
+              <use href="#icon-git-branch" />
+            </svg>
+            <span data-i18n="nav.routing">路由策略</span>
+          </a>
+          <a class="nav" href="/keys" data-nav="keys">
+            <svg class="nav__icon" aria-hidden="true" focusable="false">
+              <use href="#icon-key-round" />
+            </svg>
+            <span data-i18n="nav.keys">API key</span>
+          </a>
+          <a class="nav" href="/settings" data-nav="settings">
+            <svg class="nav__icon" aria-hidden="true" focusable="false">
+              <use href="#icon-settings" />
+            </svg>
+            <span data-i18n="nav.settings">设置</span>
+          </a>
+          <a class="nav" href="/logs" data-nav="logs">
+            <svg class="nav__icon" aria-hidden="true" focusable="false">
+              <use href="#icon-scroll-text" />
+            </svg>
+            <span data-i18n="nav.logs">日志</span>
+          </a>
+
+          <!-- 状态区：钉在导航列表下方（margin-top:auto）。
+               圆点是健康指示（有风控告警转红，title 里列告警）；地址是浏览器
+               实际用来打开面板的 host:port（app-view-overview.js 的 renderServer
+               写它，取值链与理由见那边的注释）；版本 / 在飞 / 运行时长与
+               `/api/state` 的其余项同源。地址是可复制的标识符，用 mono；
+               宽度不够时截断中段，完整值在 title。
+
+               窄屏（≤720px）侧边栏整体退场，这一行也随之消失（降级：状态是
+               辅助信息，手机上健康问题仍由概览风控横幅与各页的错误横幅报告）。 -->
+          <div class="sidebar__status">
+            <div class="sidebar__status-row">
+              <span class="status">
+                <span class="status__dot" data-role="server-dot"></span>
+              </span>
+              <span
+                class="sidebar__status-address mono"
+                data-role="server-address"
+                data-i18n-attr="title:status.address"
+                >—</span
+              >
+            </div>
+            <div class="sidebar__status-row">
+              <span class="status__value" data-role="server-version" data-i18n-attr="title:status.version">—</span>
+              <span class="status__sep" aria-hidden="true">·</span>
+              <span class="status">
+                <span data-i18n="status.inflight">在飞</span>
+                <span class="status__value" data-role="server-inflight">—</span>
+              </span>
+              <span class="status__sep" aria-hidden="true">·</span>
+              <span class="status__value" data-role="server-uptime" data-i18n-attr="title:status.uptime">—</span>
+            </div>
+          </div>
+        </nav>
+
+        <main class="content">
+          <!-- 读取失败（例如调度器不可用）时出现。未登录不再在这里提示：
+               没有会话时整页会被服务端 302 到 /login。 -->
+          <div class="content__note">
+            <div class="banner banner--danger" id="state-banner" hidden>
+              <span data-role="state-error"></span>
+            </div>
+          </div>

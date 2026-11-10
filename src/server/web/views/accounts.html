@@ -1,0 +1,239 @@
+          <!-- ② 账号页：统计行 + 状态筛选 / 搜索 + 批量操作条 + 九列表格
+               （复选框 / 账号 / 路由 / 状态 / 并发 / 流量占比 / 额度 / 代理 / 操作）。
+               点行或点额度格打开详情大窗；低频操作（权重 / 启停 /
+               删除）收进行尾的 ⋯ 菜单。两个登录按钮与导入 / 导出也在这里。 -->
+          <div class="page dense" data-view="accounts" hidden>
+            <!-- PageHeader：标题 + 一句说明 + 右侧全局动作。 -->
+            <header class="page-header">
+              <div class="page-header__heading">
+                <h1 class="page-title" data-i18n="nav.accounts">账号</h1>
+                <p class="page-header__desc" data-i18n="accounts.description">管理可用账号、套餐与额度。</p>
+              </div>
+              <div class="page-header__actions">
+                <!-- 出口代理：代理是账号属性的命名字典，所以管理入口在这一页，
+                     不在侧边栏。动作名与代理抽屉自己的 `proxies-*` 一族分开：
+                     它打开抽屉，`proxies-*` 管抽屉里的表。 -->
+                <button
+                  type="button"
+                  class="btn"
+                  data-action="accounts-open-proxies"
+                  data-i18n="proxies.drawer.title"
+                >
+                  出口代理
+                </button>
+                <!-- 添加账号是这一页的主动作：模态打开时默认停在登录 tab、服务商按
+                     当前账号预选（`openAddModal` 的默认 provider 逻辑）。 -->
+                <button type="button" class="btn btn--primary" data-action="open-add" data-i18n="accounts.add">添加账号</button>
+              </div>
+            </header>
+            <div class="page-body">
+
+            <!-- 变更失败的统一出口：显示错误码对应的文案，未知码回退原文。
+                 `role="alert"`：容器是静态的，只翻 `hidden`——由无到有这一次变化
+                 读屏器会自己播报，不需要重新聚焦。 -->
+            <div class="banner banner--danger" data-role="accounts-error" role="alert" hidden>
+              <span data-role="accounts-error-text"></span>
+              <span class="toolbar__spacer"></span>
+              <button type="button" class="btn" data-action="dismiss-accounts-error" data-i18n="common.close">关闭</button>
+            </div>
+
+            <!-- 操作结果提示（成功 / 中断了几个在飞请求）：与错误横幅同一层。 -->
+            <div class="banner banner--ok" data-role="accounts-notice" role="status" hidden>
+              <span data-role="accounts-notice-text"></span>
+            </div>
+
+            <!-- 统计行：四个小卡，数字大字 + 标签小字。数值由视图从
+                 accounts 派生（总数 / 可用 / 异常 / 额度占用），无采样时显 —。 -->
+            <div class="stats">
+              <div class="stat">
+                <span class="stat__value" data-role="accounts-stat-total">—</span>
+                <span class="stat__label" data-i18n="accounts.stats.total">账号总数</span>
+              </div>
+              <div class="stat">
+                <span class="stat__value" data-role="accounts-stat-available">—</span>
+                <span class="stat__label" data-i18n="accounts.stats.available">可用账号</span>
+              </div>
+              <div class="stat">
+                <span class="stat__value" data-role="accounts-stat-abnormal">—</span>
+                <span class="stat__label" data-i18n="accounts.stats.abnormal">异常账号</span>
+              </div>
+              <div class="stat">
+                <span class="stat__value" data-role="accounts-stat-quota">—</span>
+                <span class="stat__label" data-i18n="accounts.stats.quota">额度占用</span>
+              </div>
+            </div>
+
+            <!-- 状态筛选 + 搜索：tab 是客户端过滤（不改服务端），计数随
+                 轮询重算；搜索按账号名 / ID 前缀匹配。纯筛选项，无新命令。 -->
+            <div class="filter-row">
+              <div class="tabs tabs--filter" data-role="accounts-filter">
+                <button type="button" class="tab tab--active" data-account-filter="all">
+                  <span data-i18n="accounts.filter.all">全部</span> (<span data-role="accounts-filter-count-all">0</span>)
+                </button>
+                <button type="button" class="tab" data-account-filter="available">
+                  <span data-i18n="accounts.filter.available">可用</span> (<span data-role="accounts-filter-count-available">0</span>)
+                </button>
+                <button type="button" class="tab" data-account-filter="abnormal">
+                  <span data-i18n="accounts.filter.abnormal">异常</span> (<span data-role="accounts-filter-count-abnormal">0</span>)
+                </button>
+                <button type="button" class="tab" data-account-filter="drained">
+                  <span data-i18n="accounts.filter.drained">额度耗尽</span> (<span data-role="accounts-filter-count-drained">0</span>)
+                </button>
+              </div>
+              <!-- 可访问名走 `aria-label`：placeholder 不是名字，加可见 `<label>`
+                   会改 `.filter-row` 的行形态。文案与日志页两个搜索框同一句。 -->
+              <input
+                class="field filter-row__search"
+                type="search"
+                data-role="accounts-search"
+                data-i18n-attr="placeholder:accounts.search,aria-label:accounts.search.label"
+                placeholder="搜索账号 / ID…"
+                aria-label="搜索账号"
+              />
+            </div>
+
+            <!-- 批量操作条：勾选 ≥1 行时出现（默认 hidden，由视图按选择数开合）。
+                 六个动作全部**循环调用现有的单条控制命令**（setAccountEnabled /
+                 setAccountConcurrency / setAccountWeight / setAccountProxy /
+                 removeAccount），控制面是本机回环，几个账号的往返可以忽略——
+                 不新增批量命令，服务端命令行表面保持不变。
+                 三个 `.bulk-bar__group` 是“不拆开的按钮组”（组内 8px）：窄屏折行时
+                 整组一起走，不会把「删除」单独掠在下一行。数值就近放在动作前：
+                 一次填写、一个动作。 -->
+            <div class="toolbar bulk-bar" data-role="accounts-bulk" hidden>
+              <span class="bulk-bar__count" data-role="accounts-bulk-count">已选 0 项</span>
+              <button type="button" class="btn" data-bulk="clear" data-i18n="accounts.bulk.clear">清空选择</button>
+              <span class="toolbar__spacer"></span>
+              <span class="bulk-bar__group">
+                <button type="button" class="btn" data-bulk="enable" data-i18n="accounts.bulk.enable">启用</button>
+                <button type="button" class="btn" data-bulk="disable" data-i18n="accounts.bulk.disable">停用</button>
+                <button type="button" class="btn btn--danger" data-bulk="delete" data-i18n="accounts.bulk.delete">删除</button>
+              </span>
+              <span class="bulk-bar__group">
+                <!-- 数值框不带可见标签（宽度只有 4.5rem，两种语言的词都装不下）：
+                     它紧挨的按钮就是它的名字（设置并发 / 设置权重），可访问名走
+                     aria-label。 -->
+                <input
+                  class="field field--num"
+                  type="number"
+                  min="0"
+                  step="1"
+                  data-role="accounts-bulk-concurrency"
+                  data-i18n-attr="aria-label:accounts.table.concurrency"
+                />
+                <button type="button" class="btn" data-bulk="concurrency" data-i18n="accounts.bulk.concurrency">设置并发</button>
+              </span>
+              <span class="bulk-bar__group">
+                <input
+                  class="field field--num"
+                  type="number"
+                  min="1"
+                  step="1"
+                  data-role="accounts-bulk-weight"
+                  data-i18n-attr="aria-label:accounts.weight"
+                />
+                <button type="button" class="btn" data-bulk="weight" data-i18n="accounts.bulk.weight">设置权重</button>
+                <button type="button" class="btn" data-bulk="weight-even" data-i18n="accounts.bulk.even">均分</button>
+              </span>
+              <span class="bulk-bar__group">
+                <select class="select" data-role="accounts-bulk-proxy" data-i18n-attr="aria-label:accounts.table.proxy"></select>
+                <button type="button" class="btn" data-bulk="proxy" data-i18n="accounts.bulk.proxy">设置代理</button>
+              </span>
+            </div>
+
+            <section class="panel">
+              <!-- 状态载荷里的账号顺序就是表格行序；`?focus=<label>` 落在哪一行由
+                   `app-view-accounts.js` 找。行点击开详情大窗，复选框 / 菜单 / 步进器
+                   等控件上的点击不触发。 -->
+              <table class="table table--tight" data-role="page-accounts-table">
+                <caption class="table__caption" data-i18n="nav.accounts">账号</caption>
+                <thead>
+                  <tr>
+                    <th scope="col" class="table__check"><input type="checkbox" data-role="accounts-check-all" data-i18n-attr="aria-label:accounts.checkAll" aria-label="全选" /></th>
+                    <th scope="col" data-i18n="table.account">账号</th>
+                    <th scope="col" data-i18n="table.routes">路由</th>
+                    <th scope="col" data-i18n="accounts.table.status">状态</th>
+                    <th scope="col" data-i18n="accounts.table.concurrency">并发</th>
+                    <th scope="col" data-i18n="accounts.table.share">流量占比</th>
+                    <th scope="col" data-i18n="accounts.table.quota">额度</th>
+                    <!-- 出口列名 + 一句风控提示：原代理页空态里那句「多个账号共用一台
+                         机器的地址，正是风控最在意的那一项」搬到这里——用户正是在这一列
+                         给账号分配出口的时候，才需要读到它。 -->
+                    <th scope="col">
+                      <span data-i18n="accounts.table.proxy">代理</span>
+                      <span class="th-hint" data-i18n="accounts.table.proxyRisk">多个账号共用一台机器的出口地址，正是上游风控最在意的一项。</span>
+                    </th>
+                    <th scope="col" class="col-actions" data-i18n="accounts.table.actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody data-role="page-accounts-body"></tbody>
+              </table>
+
+              <!-- 空状态引导：登录 / 导入本机文件（两个入口）；
+                   有账号但被筛选 / 搜索滤空时用另一个更轻的空态。 -->
+              <div class="empty" data-role="page-accounts-empty" hidden>
+                <div class="empty__title" data-i18n="accounts.empty.title">还没有账号</div>
+                <div class="empty__hint" data-i18n="accounts.empty.hint">登录一个 ZCode 账号，或导入本机认证文件。命令行 `zcode-proxy auth login` 也能登录建号。</div>
+                <div class="empty__actions">
+                  <button type="button" class="btn" data-action="open-add" data-add-tab="login" data-i18n="accounts.empty.login">登录</button>
+                  <button type="button" class="btn" data-action="open-add" data-add-tab="credential" data-i18n="accounts.empty.import">导入本机文件</button>
+                </div>
+              </div>
+              <p class="empty-inline" data-role="page-accounts-nomatch" hidden data-i18n="accounts.nomatch">没有匹配的账号。</p>
+            </section>
+
+            <!-- 导入 / 导出（从设置页的「数据」组搬过来）。这两件事的主语是
+                 账号，与同一页的表格一起看才对得上：导入建号、导出就是这一张表的内容。
+                 配置文件路径留在设置页（它描述的是那一页写入的落点）。 -->
+            <section class="group">
+              <h2 class="group__title" data-i18n="accounts.transfer.title">导入 / 导出</h2>
+              <div class="group__body field-grid">
+                <!-- 每格一个动作：标签在上、控件行在下、说明压在控件下（与全项目同一套
+                     字段骨架）。导入 / 导出都走浏览器原生文件交互——导入选文件、
+                     导出走下载；服务端文件系统的路径对浏览器用户不可见，所以那一格
+                     路径输入框删了。 -->
+                <div class="field-cell">
+                  <span class="field-cell__label" data-i18n="settings.import">导入账号</span>
+                  <!-- 两行共用一个 `.transfer-row`——首件控件（选择文件 /
+                       格式下拉）取同一档定宽，两行的密码框起点与宽度因此对齐。 -->
+                  <span class="row transfer-row">
+                    <!-- 隐藏的 file input：`display:none` 的框也能被程序点开
+                         （全局 `[hidden]` 是 `display:none !important`），
+                         按钮代点它，选择结果走 change。与聊天附件入口同一个形态。 -->
+                    <input
+                      type="file"
+                      data-role="accounts-importFile"
+                      accept=".json,application/json"
+                      aria-hidden="true"
+                      tabindex="-1"
+                      hidden
+                    />
+                    <button
+                      type="button"
+                      class="btn"
+                      data-action="accounts-import-pick"
+                      data-i18n="settings.import.pick"
+                    >选择文件</button>
+                    <input class="field" type="password" autocomplete="off" data-role="accounts-importPassword" data-i18n-attr="placeholder:settings.import.passwordHint" />
+                    <button type="button" class="btn" data-action="accounts-import" data-i18n="settings.import.submit">导入</button>
+                  </span>
+                  <!-- 导入只有一段说明：「已选文件 / 未选择文件」与「什么文件
+                       能导」合成同一行，长值一行截断、全句挂 title（长只读值 +
+                       长说明都折进 title）。内容由 `renderTransfer` 写。 -->
+                  <span class="hint hint--clip" data-role="accounts-importName"></span>
+                </div>
+                <div class="field-cell">
+                  <span class="field-cell__label" data-i18n="settings.export">导出账号</span>
+                  <span class="row transfer-row">
+                    <!-- 格式下拉的可访问名：旁边的 `.field-cell__label` 是 span，不是
+                         `<label for>`（下拉是运行时填选项的，没有静态 id）。 -->
+                    <select class="select" data-role="accounts-exportFormat" data-i18n-attr="aria-label:settings.export.format"></select>
+                    <input class="field" type="password" autocomplete="off" data-role="accounts-exportPassword" data-i18n-attr="placeholder:settings.export.passwordHint" />
+                    <button type="button" class="btn" data-action="accounts-export" data-i18n="settings.export.submit">导出</button>
+                  </span>
+                  <span class="hint" data-i18n="settings.export.hint" data-i18n-attr="title:settings.export.hint">导出会下载一个 JSON 文件；明文导出需要输入 EXPORT 确认，掩码只回显清单。</span>
+                </div>
+              </div>
+            </section>
+            </div>
+          </div>
