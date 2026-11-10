@@ -4,8 +4,10 @@
  * pasted callback URL. Pure presentation/IO — the URL parsing and CSRF state
  * check live in `parsePastedCallbackUrl` (auth/oauth.ts).
  *
- * Used by the CLI (`auth login bigmodel --paste`) and the TUI (`L` key),
- * which suspend their own rendering before calling into these.
+ * Used by the CLI (`auth login bigmodel --paste`), which targets headless
+ * machines (Docker, containers): the localhost callback server is still bound,
+ * but the browser cannot reach it, so the user pastes the redirected URL back.
+ * The poll flow is the primary login for both providers.
  */
 import { createInterface } from "node:readline";
 
@@ -16,8 +18,7 @@ export function boldIfTTY(text: string): string {
 
 /**
  * Multi-line instructions shown after the flow started, before reading the
- * pasted URL. Printed to the REAL terminal by both entries (the CLI's
- * console is never intercepted; the TUI passes its captured stdout writer).
+ * pasted URL, on the REAL terminal (the CLI's console is never intercepted).
  * Deliberately loud: the user must understand that the browser "error" page
  * is the expected hand-off, and what the redirected URL looks like.
  */
@@ -51,8 +52,8 @@ export function pasteLoginInstructions(
 
 /**
  * Read one line of stdin (the pasted callback URL) with an overall timeout.
- * Callers put the terminal into cooked mode first (the TUI leaves raw mode
- * before this), so the tty line discipline echoes the paste. Rejects with
+ * Callers put the terminal into cooked mode first, so the tty line discipline
+ * echoes the paste. Rejects with
  * the standard login-timeout message, or when stdin closes without a line
  * (e.g. piped/empty input) so the flow can never hang forever.
  */

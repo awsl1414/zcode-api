@@ -1,7 +1,7 @@
 /**
- * Cross-platform default-browser launcher, shared by the CLI auth flows and
- * the TUI login action. Best-effort: a failure leaves the URL on screen for
- * the user to copy manually.
+ * Cross-platform default-browser launcher, shared by the CLI auth flows and the
+ * web panel startup.
+ * Best-effort: a failure leaves the URL on screen for the user to copy manually.
  */
 import { spawn, type SpawnOptions } from "node:child_process";
 

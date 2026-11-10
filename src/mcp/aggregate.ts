@@ -33,6 +33,7 @@
  * @see upstream.ts for the per-plugin JSON-RPC client
  * @see ../server/routes-mcp.ts for the HTTP surface
  */
+import type { EgressOptions } from "../proxy/egress.js";
 import {
   OfficialMcpUpstream,
   McpSessionExpiredError,
@@ -97,7 +98,7 @@ export class McpAggregateServer {
   constructor(
     private readonly origin: string,
     private readonly auth: OfficialMcpAuth,
-    private readonly options: { fetchImpl?: typeof fetch; serverVersion?: string; toolsTtlMs?: number } = {},
+    private readonly options: { fetchImpl?: typeof fetch; serverVersion?: string; toolsTtlMs?: number; egress?: EgressOptions } = {},
   ) {
     this.slots = OFFICIAL_MCP_CATALOGUE.servers.map((s) => ({
       key: s.key,
@@ -115,8 +116,8 @@ export class McpAggregateServer {
     if (message.method === undefined) {
       return { kind: "reply", message: rpcError(message.id ?? null, -32600, "Invalid Request: missing method") };
     }
-    // A message without an id is a notification — never answered, whatever
-    // the method (JSON-RPC 2.0 §5).
+    // A message without an id is a notification: never answered, whatever
+    // the method (JSON-RPC 2.0 section 5).
     if (message.id === undefined || message.id === null) {
       return { kind: "notification" };
     }
@@ -168,7 +169,7 @@ export class McpAggregateServer {
     slot.ensuring ??= (async () => {
       slot.unavailableReason = undefined;
       try {
-        const upstream = (slot.upstream ??= new OfficialMcpUpstream(this.origin, { routeId: slot.routeId, path: slot.path }, this.auth, this.options.fetchImpl));
+        const upstream = (slot.upstream ??= new OfficialMcpUpstream(this.origin, { routeId: slot.routeId, path: slot.path }, this.auth, this.options.fetchImpl, this.options.egress));
         await upstream.initialize("zcode-proxy-mcp");
         slot.tools = await upstream.listTools();
         slot.toolsAt = Date.now();
@@ -211,7 +212,7 @@ export class McpAggregateServer {
     if (!original) {
       return rpcError(id, -32602, `Tool name "${namespaced}" is missing the tool part after "${key}${NAMESPACE_SEPARATOR}"`);
     }
-    const upstream = (slot.upstream ??= new OfficialMcpUpstream(this.origin, { routeId: slot.routeId, path: slot.path }, this.auth, this.options.fetchImpl));
+    const upstream = (slot.upstream ??= new OfficialMcpUpstream(this.origin, { routeId: slot.routeId, path: slot.path }, this.auth, this.options.fetchImpl, this.options.egress));
     try {
       await upstream.initialize("zcode-proxy-mcp");
       const result = await upstream.callTool(original, p?.arguments);

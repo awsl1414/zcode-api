@@ -14,7 +14,7 @@ const AUTH = buildOfficialMcpAuthHeaders({
   secret: "sec",
   provider: "zai",
   jwt: "jwt-1",
-} as Credential);
+} as Credential, { targetType: "PERSONAL" });
 
 const PLUGIN_COUNT = OFFICIAL_MCP_CATALOGUE.servers.length;
 
