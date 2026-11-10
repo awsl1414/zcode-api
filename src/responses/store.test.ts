@@ -11,6 +11,10 @@ function entry(id: string): StoredResponse {
     output: [],
     createdAt: 0,
     lastAccessedAt: 0,
+    // 产出这条响应的 `(account, route)`，续轮据此钉号；本文件的用例只测 LRU/TTL，
+    // 这两项对它们无意义，但类型上是必需的。
+    accountId: "account-test",
+    routeKind: "coding-plan",
   };
 }
 

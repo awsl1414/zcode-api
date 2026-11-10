@@ -8,7 +8,7 @@
  *
  * Reference: https://platform.openai.com/docs/api-reference/responses
  *
- * Scope (P1.0): request body, batch response, and streaming SSE events covering
+ * Scope: request body, batch response, and streaming SSE events covering
  * text / reasoning / function_call / web_search_call outputs. The streaming
  * event set mirrors what Codex CLI consumes (verified against the Vercel AI SDK
  * Responses provider in the historical client bundle and sub2api's bridge).
@@ -79,7 +79,28 @@ export type ResponsesInputItem =
   | { type: "file_search_call" | "code_interpreter_call" | "computer_call" | "image_generation_call"; id?: string; status?: string; [k: string]: unknown }
   | { type: string; [k: string]: unknown };
 
-/** POST /v1/responses request body. */
+/**
+ * Text controls on a Responses request: the structured-output channel
+ * (`format`) and the output-verbosity knob (`verbosity`). Declared so the audit
+ * can reject the shapes the upstream cannot honor (`protocol-fields.ts`)
+ * rather than dropping them silently.
+ */
+export interface ResponsesTextControls {
+  format?:
+    | { type: "text" }
+    | { type: "json_object" }
+    | { type: "json_schema"; name?: string; schema?: Record<string, unknown>; strict?: boolean };
+  verbosity?: "low" | "medium" | "high";
+}
+
+/**
+ * POST /v1/responses request body.
+ *
+ * Deliberately **no index signature**: `keyof ResponsesRequest` must stay the
+ * real field set so that `RESPONSES_REQUEST_FIELDS` (`protocol-fields.ts`) can be
+ * typed `Record<keyof ResponsesRequest, FieldVerdict>` and enforce exhaustiveness
+ * — adding a field here without a disposition fails `tsc`.
+ */
 export interface ResponsesRequest {
   model: string;
   input: ResponsesInputItem[] | string;
@@ -99,7 +120,24 @@ export interface ResponsesRequest {
   service_tier?: string;
   prompt_cache_key?: string;
   include?: string[];
-  [k: string]: unknown;
+  /** Structured-output / verbosity controls (upstream has neither channel). */
+  text?: ResponsesTextControls;
+  /** Input-truncation policy; only `"disabled"` (the OpenAI default) is honorable. */
+  truncation?: "auto" | "disabled";
+  /** Async execution flag — the proxy has no async response queue. */
+  background?: boolean;
+  /** Tool-call budget — no upstream equivalent. */
+  max_tool_calls?: number;
+  /** Log-probability request — no upstream equivalent. */
+  top_logprobs?: number;
+  /** Streaming options; `include_usage` is always satisfied (usage rides the terminal event). */
+  stream_options?: { include_usage?: boolean };
+  /** Hosted conversation object — unsupported; use `previous_response_id`. */
+  conversation?: string | { id: string };
+  /** Abuse-detection identifier — no upstream field, not forwarded. */
+  safety_identifier?: string;
+  /** Codex CLI telemetry extension (not an OpenAI field); accepted and ignored. */
+  client_metadata?: Record<string, unknown>;
 }
 
 // ─────────────────────────────────────────────

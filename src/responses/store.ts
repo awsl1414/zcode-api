@@ -2,22 +2,33 @@
  * In-memory response store for the Responses API's `previous_response_id`.
  *
  * The Responses API is stateful: a client passes `previous_response_id`, and
- * the server (OpenAI) reconstructs the full conversation from that stored
- * response. On a non-OpenAI upstream (GLM Chat Completions) we must emulate
- * this ourselves — store each completed response keyed by id, and on the next
- * request prepend the stored `input[]` + `output[]` history so the upstream
- * sees a complete conversation.
+ * the server is expected to reconstruct the full conversation from that stored
+ * response. The upstream here takes a whole conversation per call (Chat
+ * Completions), so the proxy keeps the history itself — store each completed
+ * response keyed by id, and on the next request prepend the stored `input[]` +
+ * `output[]` history so the upstream sees a complete conversation.
  *
  * Backed by a bounded LRU cache with TTL eviction. Process restart drops
- * everything (documented limitation — OpenAI persists for ~30 days, we can't
- * match that without a persistence layer; in-memory is the P1.0 scope).
+ * everything (a known limitation: OpenAI keeps responses for ~30 days, which
+ * would need a persistence layer this proxy does not have).
  *
  * Thread-safety: single-process; JS event loop serialises access.
  */
 
 import type { ResponsesInputItem, ResponsesOutputItem, ResponsesUsage } from "../translator/responses-types.js";
+import type { RouteKind } from "../accounts/types.js";
 
-/** A stored response entry — enough to reconstruct the next turn's history. */
+/**
+ * A stored response entry — enough to reconstruct the next turn's history,
+ * plus the `(account, route)` that produced it.
+ *
+ * `accountId` / `routeKind` are the continuation pin. `previous_response_id` is
+ * stateful: the upstream conversation lives on one account, so the next turn
+ * must go back to the same `(account, route)`.
+ * Re-dispatching it through the scheduler would silently change accounts and
+ * break the upstream-side state, along with the risk-control session namespace
+ * (sessions are kept per account).
+ */
 export interface StoredResponse {
   id: string;
   model: string;
@@ -28,6 +39,10 @@ export interface StoredResponse {
   instructions?: string;
   createdAt: number;
   lastAccessedAt: number;
+  /** 产出这条响应的账号（`Account.id`，不是 label）。续轮钉号用。*/
+  accountId: string;
+  /** 产出这条响应的路由：状态化的续轮必须回到同一条路由。*/
+  routeKind: RouteKind;
 }
 
 export interface ResponseStoreOptions {

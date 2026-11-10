@@ -2,7 +2,7 @@
  * Tests for SSE event translator.
  */
 import { describe, it, expect } from "bun:test";
-import { anthropicSseToOpenaiSse, openaiSseToAnthropicSse, parseSSEChunk } from "./sse-translator.js";
+import { anthropicSseToOpenaiSse, parseSSEChunk } from "./sse-translator.js";
 
 function makeStream(text: string): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -56,19 +56,6 @@ function parseChunks(output: string): ParsedChunk[] {
     .map((l) => JSON.parse(l.slice(6)) as ParsedChunk);
 }
 
-function parseAnthropicEvents(output: string): Array<{ event: string; data: any }> {
-  return output
-    .split("\n\n")
-    .map((block) => {
-      const lines = block.trim().split("\n").filter(Boolean);
-      const event = lines.find((line) => line.startsWith("event: "))?.slice(7) ?? "";
-      const dataLine = lines.find((line) => line.startsWith("data: "));
-      if (!dataLine) return null;
-      return { event, data: JSON.parse(dataLine.slice(6)) };
-    })
-    .filter((event): event is { event: string; data: any } => event !== null);
-}
-
 const ANTHROPIC_SSE = [
   'event: message_start',
   'data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"glm-4.6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}',
@@ -93,7 +80,7 @@ const ANTHROPIC_SSE = [
   '',
 ].join('\n');
 
-describe("parseSSEChunk — lenient frame/data parsing (R2-18)", () => {
+describe("parseSSEChunk — lenient frame/data parsing", () => {
   it("parses a data line without the optional space after the colon", () => {
     const parsed = parseSSEChunk('event: message_stop\ndata:{"type":"message_stop"}\n\n');
     expect(parsed).toHaveLength(1);
@@ -616,303 +603,43 @@ describe("anthropicSseToOpenaiSse", () => {
     expect(finishReasons).toHaveLength(1);
     expect(finishReasons[0]).toBe("stop");
   });
-});
 
-describe("openaiSseToAnthropicSse", () => {
-  it("emits message_start on first chunk", async () => {
+  it("observes the raw Anthropic usage snapshot via the onUsage hook", async () => {
+    // OpenAI usage 装不下 cache_creation（anthropicUsageToOpenAI 有意不镜像），
+    // 那个桶只能从钩子拿——快照仍是 Anthropic 形状。
+    const seen: Array<{ input: number; read: number | undefined; creation: number | undefined }> = [];
     const sse = [
-      'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":123,"model":"glm-4.6","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
+      'event: message_start',
+      `data: ${JSON.stringify({
+        type: "message_start",
+        message: { id: "msg_1", model: "glm-4.6", usage: { input_tokens: 10, cache_read_input_tokens: 1216, cache_creation_input_tokens: 4 } },
+      })}`,
+      '',
+      'event: content_block_delta',
+      `data: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hi" } })}`,
+      '',
+      'event: message_delta',
+      `data: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { input_tokens: 12, output_tokens: 3, cache_read_input_tokens: 0, cache_creation_input_tokens: 8 } })}`,
+      '',
+      'event: message_stop',
+      `data: ${JSON.stringify({ type: "message_stop" })}`,
       '',
     ].join('\n');
-    const input = makeStream(sse);
-    const output = await collectStream(openaiSseToAnthropicSse(input, "glm-4.6"));
-    expect(output).toContain("message_start");
-    expect(output).toContain('"role":"assistant"');
+    const output = await collectStream(anthropicSseToOpenaiSse(makeStream(sse), "glm-4.6", (usage) => {
+      seen.push({ input: usage.input_tokens, read: usage.cache_read_input_tokens, creation: usage.cache_creation_input_tokens });
+    }));
+    // 翻译输出不受钩子影响：usage 块仍然只有 OpenAI 形状的字段。
+    expect(output).toContain('"prompt_tokens_details":{"cached_tokens":0}');
+    // 钩子每次折用量后回调一次（message_start + message_delta），带当前快照；
+    // 字段是绝对值，后到的覆盖先到的——最后一次是终值。
+    expect(seen).toEqual([
+      { input: 10, read: 1216, creation: 4 },
+      { input: 12, read: 0, creation: 8 },
+    ]);
   });
 
-  it("translates delta.content to text_delta", async () => {
-    const sse = [
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}',
-      '',
-      'data: [DONE]',
-      '',
-    ].join('\n');
-    const input = makeStream(sse);
-    const output = await collectStream(openaiSseToAnthropicSse(input, "glm-4.6"));
-    expect(output).toContain("text_delta");
-    expect(output).toContain('"text":"Hi"');
-  });
-
-  it("translates delta.reasoning_content to thinking_delta", async () => {
-    const sse = [
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"reasoning_content":"I should answer directly."},"finish_reason":null}]}',
-      '',
-      'data: [DONE]',
-      '',
-    ].join('\n');
-
-    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
-
-    expect(output).toContain("thinking_delta");
-    expect(output).toContain('"thinking":"I should answer directly."');
-  });
-
-  it("keeps consecutive reasoning_content deltas in one official Anthropic thinking block", async () => {
-    const sse = [
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"reasoning_content":"First step. "},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"reasoning_content":"Second step."},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Final."},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
-      '',
-      'data: [DONE]',
-      '',
-    ].join('\n');
-
-    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
-    const events = parseAnthropicEvents(output);
-    const thinkingStarts = events.filter((e) =>
-      e.event === "content_block_start" && e.data.content_block?.type === "thinking"
-    );
-    const thinkingDeltas = events.filter((e) => e.data.delta?.type === "thinking_delta");
-    const thinkingStops = events.filter((e) =>
-      e.event === "content_block_stop" && e.data.index === thinkingStarts[0]?.data.index
-    );
-    const textStarts = events.filter((e) =>
-      e.event === "content_block_start" && e.data.content_block?.type === "text"
-    );
-
-    expect(thinkingStarts).toHaveLength(1);
-    expect(thinkingStarts[0].data).toEqual({
-      type: "content_block_start",
-      index: 0,
-      content_block: { type: "thinking", thinking: "", signature: "" },
-    });
-    expect(thinkingDeltas.map((e) => e.data.index)).toEqual([0, 0]);
-    expect(thinkingDeltas.map((e) => e.data.delta.thinking)).toEqual(["First step. ", "Second step."]);
-    expect(thinkingStops).toHaveLength(1);
-    expect(textStarts[0].data.index).toBe(1);
-  });
-
-  it("emits message_stop on [DONE]", async () => {
-    const sse = [
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
-      '',
-      'data: [DONE]',
-      '',
-    ].join('\n');
-    const input = makeStream(sse);
-    const output = await collectStream(openaiSseToAnthropicSse(input, "glm-4.6"));
-    expect(output).toContain("message_stop");
-  });
-
-  it("translates OpenAI tool_calls delta into Anthropic tool_use content_block_start + input_json_delta", async () => {
-    const sse = [
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"city\\":"}}]},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"SF\\"}"}}]},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
-      '',
-      'data: [DONE]',
-      '',
-    ].join('\n');
-
-    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
-    const events = parseAnthropicEvents(output);
-
-    const blockStarts = events.filter((e) => e.event === "content_block_start");
-    const toolStart = blockStarts.find((e) => e.data.content_block?.type === "tool_use");
-    expect(toolStart).toBeDefined();
-    expect(toolStart!.data.content_block).toEqual({
-      type: "tool_use",
-      id: "call_1",
-      name: "get_weather",
-      input: {},
-    });
-
-    const jsonDeltas = events.filter((e) => e.data.delta?.type === "input_json_delta");
-    expect(jsonDeltas.map((e) => e.data.delta.partial_json).join("")).toBe('{"city":"SF"}');
-
-    const blockStops = events.filter((e) => e.event === "content_block_stop" && e.data.index === toolStart!.data.index);
-    expect(blockStops).toHaveLength(1);
-
-    const messageDelta = events.find((e) => e.event === "message_delta");
-    expect(messageDelta!.data.delta.stop_reason).toBe("tool_use");
-  });
-
-  it("routes parallel OpenAI tool_calls by index into separate Anthropic tool_use blocks", async () => {
-    const sse = [
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"w","arguments":"{}"}}]},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"w","arguments":"{}"}}]},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
-      '',
-      'data: [DONE]',
-      '',
-    ].join('\n');
-
-    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
-    const events = parseAnthropicEvents(output);
-    const toolStarts = events.filter((e) => e.event === "content_block_start" && e.data.content_block?.type === "tool_use");
-
-    expect(toolStarts).toHaveLength(2);
-    expect(toolStarts[0].data.content_block.id).toBe("call_a");
-    expect(toolStarts[1].data.content_block.id).toBe("call_b");
-    expect(toolStarts[0].data.index).not.toBe(toolStarts[1].data.index);
-  });
-
-  it("buffers tool_call arguments that arrive before id/name and flushes them on block start", async () => {
-    // Non-standard ordering: arguments delta first, id+name later.
-    const sse = [
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"city\\":"}}]},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_late","type":"function","function":{"name":"get_weather","arguments":"\\"SF\\"}"}}]},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
-      '',
-      'data: [DONE]',
-      '',
-    ].join('\n');
-
-    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
-    const events = parseAnthropicEvents(output);
-    const toolStart = events.find((e) => e.event === "content_block_start" && e.data.content_block?.type === "tool_use");
-    expect(toolStart).toBeDefined();
-    expect(toolStart!.data.content_block.id).toBe("call_late");
-    expect(toolStart!.data.content_block.name).toBe("get_weather");
-
-    const jsonDeltas = events.filter((e) => e.data.delta?.type === "input_json_delta");
-    expect(jsonDeltas.map((e) => e.data.delta.partial_json).join("")).toBe('{"city":"SF"}');
-  });
-
-  it("force-opens a tool block with fallback id/name when arguments arrive but id/name never do", async () => {
-    const sse = [
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
-      '',
-      'data: [DONE]',
-      '',
-    ].join('\n');
-
-    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
-    const events = parseAnthropicEvents(output);
-    const toolStart = events.find((e) => e.event === "content_block_start" && e.data.content_block?.type === "tool_use");
-    expect(toolStart).toBeDefined();
-    expect(toolStart!.data.content_block.id).toBe("tool_call_0");
-    expect(toolStart!.data.content_block.name).toBe("unknown_tool");
-    const jsonDeltas = events.filter((e) => e.data.delta?.type === "input_json_delta");
-    expect(jsonDeltas.map((e) => e.data.delta.partial_json).join("")).toBe("{}");
-  });
-
-  it("closes the text block before opening a tool_use block (no interleaved blocks)", async () => {
-    const sse = [
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Thinking about it"},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"fn","arguments":"{}"}}]},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
-      '',
-      'data: [DONE]',
-      '',
-    ].join('\n');
-
-    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
-    const events = parseAnthropicEvents(output);
-    const textStart = events.find((e) => e.event === "content_block_start" && e.data.content_block?.type === "text");
-    const toolStart = events.find((e) => e.event === "content_block_start" && e.data.content_block?.type === "tool_use");
-    const textStop = events.find((e) => e.event === "content_block_stop" && e.data.index === textStart!.data.index);
-
-    expect(textStart).toBeDefined();
-    expect(toolStart).toBeDefined();
-    // text block must stop before tool block starts
-    const textStopOrder = events.indexOf(textStop!);
-    const toolStartOrder = events.indexOf(toolStart!);
-    expect(textStopOrder).toBeLessThan(toolStartOrder);
-  });
-
-  it("emits a well-formed message_stop when stream ends without [DONE]", async () => {
-    const sse = [
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}',
-      '',
-    ].join('\n');
-
-    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
-    const events = parseAnthropicEvents(output);
-    expect(events.some((e) => e.event === "message_delta")).toBe(true);
-    expect(events.some((e) => e.event === "message_stop")).toBe(true);
-  });
-
-  it("reports real input_tokens via message_delta when usage only arrives in the final chunk", async () => {
-    // OpenAI include_usage stream: usage lands on a trailing choices-less chunk
-    // AFTER the finish_reason chunk. The deferred message_delta must carry it.
-    const sse = [
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7,"total_tokens":49}}',
-      '',
-      'data: [DONE]',
-      '',
-    ].join('\n');
-
-    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
-    const events = parseAnthropicEvents(output);
-    const messageDelta = events.find((e) => e.event === "message_delta");
-    expect(messageDelta).toBeDefined();
-    expect(messageDelta!.data.usage.input_tokens).toBe(42);
-    expect(messageDelta!.data.usage.output_tokens).toBe(7);
-  });
-
-  it("subtracts cached tokens from input_tokens in the deferred message_delta", async () => {
-    const sse = [
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":80}}}',
-      '',
-      'data: [DONE]',
-      '',
-    ].join('\n');
-
-    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
-    const events = parseAnthropicEvents(output);
-    const messageDelta = events.find((e) => e.event === "message_delta");
-    expect(messageDelta!.data.usage.input_tokens).toBe(20); // 100 - 80
-    expect(messageDelta!.data.usage.cache_read_input_tokens).toBe(80);
-    expect(messageDelta!.data.usage.output_tokens).toBe(5);
-  });
-
-  it("emits exactly one message_delta even when both finish_reason and [DONE] are present", async () => {
-    const sse = [
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
-      '',
-      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}',
-      '',
-      'data: [DONE]',
-      '',
-    ].join('\n');
-
-    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
-    const events = parseAnthropicEvents(output);
-    const deltas = events.filter((e) => e.event === "message_delta");
-    const stops = events.filter((e) => e.event === "message_stop");
-    expect(deltas).toHaveLength(1);
-    expect(stops).toHaveLength(1);
-    expect(deltas[0].data.delta.stop_reason).toBe("end_turn");
+  it("works without the onUsage hook (existing callers unchanged)", async () => {
+    const output = await collectStream(anthropicSseToOpenaiSse(makeStream(ANTHROPIC_SSE), "glm-4.6"));
+    expect(output).toContain('"prompt_tokens":10');
   });
 });
