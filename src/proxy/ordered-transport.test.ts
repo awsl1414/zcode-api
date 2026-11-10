@@ -11,11 +11,12 @@
  *     (single upstream request) and the client gets a 502
  */
 import { describe, it, expect } from "bun:test";
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { sendOrderedUpstreamRequest, orderedAdvertisedCodings } from "./ordered-transport.js";
-import { proxyRequest, capOrderedAcceptEncoding } from "./handler.js";
-import { AuthManager } from "../auth/manager.js";
+import { proxyRequest } from "./handler.js";
+import { capOrderedAcceptEncoding } from "./http-io.js";
+import { brokerFor } from "../accounts/testing.js";
 import type { ProxyConfig, ProxyIdentity } from "../config/types.js";
 
 interface SilentServer {
@@ -108,8 +109,11 @@ describe("sendOrderedUpstreamRequest — abort propagation", () => {
 
 const IDENTITY: ProxyIdentity = {
   appVersion: "test-1.0.0",
+  appVersionSource: "default",
   sourceTitle: "cli",
   refererOrigin: "https://zcode.z.ai",
+  betaPolicy: "drop",
+  betaAllowlist: [],
 };
 
 async function compressBytes(plain: string, format: Bun.CompressionFormat): Promise<Uint8Array> {
@@ -254,9 +258,7 @@ describe("proxyRequest — ordered transport + brotli SSE (ultra gateway regress
     try {
       const config: ProxyConfig = {
         server: { port: 8080, host: "127.0.0.1" },
-        auth: {},
-        provider: "zai",
-        plan: "coding-plan",
+        auth: { requireKey: false },
         providers: {
           zai: { anthropicBase: s.url, openaiBase: s.url },
           bigmodel: { anthropicBase: s.url, openaiBase: s.url },
@@ -265,16 +267,20 @@ describe("proxyRequest — ordered transport + brotli SSE (ultra gateway regress
         models: ["glm-4.6"],
         identity: IDENTITY,
         clientIdentity: { mode: "enforce", ttlSeconds: 900, maxSessions: 1024 },
-        responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+        responses: { storeMaxEntries: 1000, storeTtlMs: 86400000 },
         endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
         clientSigning: { enabled: false }, highspeed: { enabled: false, origin: "https://zcode.z.ai", models: [] },
-        mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
+        mcp: { enabled: true, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
         async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
-        claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
+        claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, sprintWindowMs: 1800000, sprintPollIntervalMs: 60000 },
         logging: { level: "info" },
       };
-      const auth = new AuthManager();
-      auth.setOAuthCredential({ apiKey: "key-mock", provider: "zai" });
+      const { broker } = brokerFor({
+        kind: "zhipu-account",
+        provider: "zai",
+        apiKey: "key-mock",
+        identity: { targetType: "PERSONAL" , deviceMid: "test-device-mid" },
+      });
 
       const clientReq = new Request("http://127.0.0.1:8080/v1/chat/completions", {
         method: "POST",
@@ -282,7 +288,7 @@ describe("proxyRequest — ordered transport + brotli SSE (ultra gateway regress
         body: JSON.stringify({ model: "glm-4.6", max_tokens: 16, stream: true, messages: [{ role: "user", content: "hi" }] }),
       });
 
-      const resp = await proxyRequest(clientReq, "openai", { config, auth });
+      const resp = await proxyRequest(clientReq, "openai", { config, broker });
       expect(resp.status).toBe(200);
       expect(resp.headers.get("content-type")).toContain("text/event-stream");
       const text = await resp.text();
@@ -301,9 +307,7 @@ describe("proxyRequest — ordered transport abort (CL-04, handler level)", () =
     try {
       const config: ProxyConfig = {
         server: { port: 8080, host: "127.0.0.1" },
-        auth: {},
-        provider: "zai",
-        plan: "coding-plan",
+        auth: { requireKey: false },
         providers: {
           zai: { anthropicBase: s.url, openaiBase: s.url },
           bigmodel: { anthropicBase: s.url, openaiBase: s.url },
@@ -313,16 +317,20 @@ describe("proxyRequest — ordered transport abort (CL-04, handler level)", () =
         identity: IDENTITY,
         // enforce mode routes the request through the ordered transport
         clientIdentity: { mode: "enforce", ttlSeconds: 900, maxSessions: 1024 },
-        responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+        responses: { storeMaxEntries: 1000, storeTtlMs: 86400000 },
         endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
         clientSigning: { enabled: false }, highspeed: { enabled: false, origin: "https://zcode.z.ai", models: [] },
-        mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
+        mcp: { enabled: true, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
         async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
-        claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
+        claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, sprintWindowMs: 1800000, sprintPollIntervalMs: 60000 },
         logging: { level: "info" },
       };
-      const auth = new AuthManager();
-      auth.setOAuthCredential({ apiKey: "key-mock", provider: "zai" });
+      const { broker } = brokerFor({
+        kind: "zhipu-account",
+        provider: "zai",
+        apiKey: "key-mock",
+        identity: { targetType: "PERSONAL" , deviceMid: "test-device-mid" },
+      });
 
       const controller = new AbortController();
       const clientReq = new Request("http://127.0.0.1:8080/v1/messages", {
@@ -332,7 +340,7 @@ describe("proxyRequest — ordered transport abort (CL-04, handler level)", () =
         signal: controller.signal,
       });
 
-      const respPromise = proxyRequest(clientReq, "anthropic", { config, auth });
+      const respPromise = proxyRequest(clientReq, "anthropic", { config, broker });
       await s.requestSeen;
       controller.abort();
       const resp = await respPromise;
@@ -342,6 +350,55 @@ describe("proxyRequest — ordered transport abort (CL-04, handler level)", () =
       expect(s.requests()).toBe(1);
       expect(await waitFor(() => s.serverSocketClosed() > 0)).toBe(true);
     } finally {
+      s.server.close();
+    }
+  });
+});
+
+describe("sendOrderedUpstreamRequest — per-account egress", () => {
+  it("routes the ordered request through the account's HTTP proxy", async () => {
+    const s = await startCodedServer("gzip", "gzip", '{"ok":true}', false);
+    let requestLines: string[] = [];
+    const proxy = createServer((req, res) => {
+      requestLines.push(`${req.method ?? ""} ${req.url ?? ""}`);
+      const target = new URL(req.url ?? "");
+      // 代理只换 socket：原方法、原头、原字节转发，不碰 content-encoding。
+      const forwarded = httpRequest(
+        {
+          host: target.hostname,
+          port: target.port,
+          path: `${target.pathname}${target.search}`,
+          method: req.method,
+          headers: req.headers,
+          agent: false,
+        },
+        (up) => {
+          res.writeHead(up.statusCode ?? 502, up.headers);
+          up.pipe(res);
+        },
+      );
+      forwarded.on("error", () => res.writeHead(502).end());
+      req.pipe(forwarded);
+    });
+    await new Promise<void>((r) => proxy.listen(0, "127.0.0.1", r));
+    const proxyPort = (proxy.address() as AddressInfo).port;
+    try {
+      const resp = await sendOrderedUpstreamRequest({
+        url: `${s.url}/v1/messages`,
+        method: "POST",
+        headers: [["content-type", "application/json"], ["accept-encoding", "gzip"]],
+        body: "{}",
+        decompress: true,
+        egress: { proxyUrl: `http://127.0.0.1:${proxyPort}` },
+      });
+
+      expect(resp.status).toBe(200);
+      expect(await resp.text()).toBe('{"ok":true}');
+      // http 目标经代理必须是 absolute-form（RFC 9112 第 3.2.2 节）。
+      expect(requestLines).toEqual([`POST ${s.url}/v1/messages`]);
+      expect(s.seenAcceptEncoding()).toBe("gzip");
+    } finally {
+      proxy.close();
       s.server.close();
     }
   });

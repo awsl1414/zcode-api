@@ -16,19 +16,38 @@
 import { describe, it, expect, mock } from "bun:test";
 import { proxyRequest, type ProxyHandlerOptions } from "./handler.js";
 import type { ProxyConfig, ProxyIdentity } from "../config/types.js";
-import { AuthManager } from "../auth/manager.js";
+import { brokerFor } from "../accounts/testing.js";
+
+/**
+ * Broker backed by an in-memory account (replaces the removed `AuthManager`:
+ * 5.0 resolves credentials through `broker.acquire()`). `routes` decides which
+ * route this request resolves to, which is what used to be the global `plan`.
+ */
+function oauthBroker(key: string, routes: ("coding-plan" | "start-plan")[] = ["coding-plan"]) {
+  const [apiKey, secret] = key.split(".");
+  return brokerFor({
+    kind: "zhipu-account",
+    provider: "zai",
+    apiKey,
+    ...(secret ? { secret } : {}),
+    // start-plan 路由按 plan JWT 鉴权（auth/capabilities.ts 规则 4）。
+    jwt: "jwt-mock",
+    identity: { targetType: "PERSONAL" , deviceMid: "test-device-mid" },
+  }, routes).broker;
+}
 
 const IDENTITY: ProxyIdentity = {
   appVersion: "test-1.0.0",
+  appVersionSource: "default",
   sourceTitle: "cli",
   refererOrigin: "https://zcode.z.ai",
+  betaPolicy: "drop",
+  betaAllowlist: [],
 };
 
 const TEST_CONFIG: ProxyConfig = {
   server: { port: 8080, host: "0.0.0.0" },
-  auth: {},
-  provider: "zai",
-  plan: "start-plan",
+  auth: { requireKey: false },
   providers: {
     zai: { anthropicBase: "https://api.z.ai/api/anthropic", openaiBase: "https://api.z.ai/api/coding/paas/v4" },
     bigmodel: { anthropicBase: "https://open.bigmodel.cn/api/anthropic", openaiBase: "https://open.bigmodel.cn/api/coding/paas/v4" },
@@ -37,12 +56,12 @@ const TEST_CONFIG: ProxyConfig = {
   models: ["glm-4.6"],
   identity: IDENTITY,
   clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
-  responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  responses: { storeMaxEntries: 1000, storeTtlMs: 86400000 },
   endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
   clientSigning: { enabled: false }, highspeed: { enabled: false, origin: "https://zcode.z.ai", models: [] },
-  mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
+  mcp: { enabled: true, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
   async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
-  claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
+  claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, sprintWindowMs: 1800000, sprintPollIntervalMs: 60000 },
   logging: { level: "info" },
 };
 
@@ -70,7 +89,7 @@ function captchaStub(getCaptchaToken: CaptchaStub["getCaptchaToken"]): CaptchaSt
   };
 }
 
-describe("proxyRequest — start-plan resilience (PR #34 review P1/P3)", () => {
+describe("proxyRequest — start-plan resilience", () => {
   it("retries an in-body 3007 captcha challenge with a fresh token", async () => {
     // Inject captcha behavior: config enabled, token take returns distinct
     // tokens per call so we can assert the retry used a FRESH token.
@@ -102,15 +121,14 @@ describe("proxyRequest — start-plan resilience (PR #34 review P1/P3)", () => {
       return new Response(ANTHROPIC_OK, { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = new AuthManager();
-    auth.setOAuthCredential({ apiKey: "key-mock", provider: "zai", jwt: "jwt-mock" });
+    const broker = oauthBroker("key-mock.secret-mock", ["start-plan"]);
     const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: '{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}',
     });
 
-    const resp = await proxyRequest(clientReq, "openai", { config: TEST_CONFIG, auth, fetchImpl: fetchMock as any, captcha });
+    const resp = await proxyRequest(clientReq, "openai", { config: TEST_CONFIG, broker, fetchImpl: fetchMock as any, captcha });
 
     // The in-body 3007 challenge was detected and retried with a fresh token.
     expect(calls).toBe(2);
@@ -144,15 +162,14 @@ describe("proxyRequest — start-plan resilience (PR #34 review P1/P3)", () => {
       return new Response(ANTHROPIC_OK, { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = new AuthManager();
-    auth.setOAuthCredential({ apiKey: "key-mock", provider: "zai", jwt: "jwt-mock" });
+    const broker = oauthBroker("key-mock.secret-mock", ["start-plan"]);
     const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: '{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}',
     });
 
-    const resp = await proxyRequest(clientReq, "openai", { config: TEST_CONFIG, auth, fetchImpl: fetchMock as any, captcha });
+    const resp = await proxyRequest(clientReq, "openai", { config: TEST_CONFIG, broker, fetchImpl: fetchMock as any, captcha });
 
     // The connect failure was retried with a FRESH Request (identity check
     // inside the mock passed).
@@ -163,7 +180,7 @@ describe("proxyRequest — start-plan resilience (PR #34 review P1/P3)", () => {
   });
 });
 
-describe("proxyRequest — start-plan strict captcha acquisition (NOTEPAD 3.16.3 §H)", () => {
+describe("proxyRequest — start-plan strict captcha acquisition", () => {
   const makeClientReq = () =>
     new Request("http://localhost:8080/v1/chat/completions", {
       method: "POST",
@@ -189,10 +206,9 @@ describe("proxyRequest — start-plan strict captcha acquisition (NOTEPAD 3.16.3
 
     const savedBudget = process.env.CAPTCHA_ACQUIRE_BUDGET_MS;
     process.env.CAPTCHA_ACQUIRE_BUDGET_MS = "10";
-    const auth = new AuthManager();
-    auth.setOAuthCredential({ apiKey: "key-mock", provider: "zai", jwt: "jwt-mock" });
+    const broker = oauthBroker("key-mock.secret-mock", ["start-plan"]);
     try {
-      const resp = await proxyRequest(makeClientReq(), "openai", { config: TEST_CONFIG, auth, fetchImpl: fetchMock as any, captcha });
+      const resp = await proxyRequest(makeClientReq(), "openai", { config: TEST_CONFIG, broker, fetchImpl: fetchMock as any, captcha });
       expect(resp.status).toBe(503);
       const body = await resp.json();
       expect(body.error.type).toBe("captcha_solver_failed");
@@ -217,12 +233,11 @@ describe("proxyRequest — start-plan strict captcha acquisition (NOTEPAD 3.16.3
     const fetchMock = mock(async () =>
       new Response(ANTHROPIC_OK, { status: 200, headers: { "content-type": "application/json" } }),
     );
-    const auth = new AuthManager();
-    auth.setOAuthCredential({ apiKey: "key-mock", provider: "zai", jwt: "jwt-mock" });
+    const broker = oauthBroker("key-mock.secret-mock", ["start-plan"]);
     const savedBudget = process.env.CAPTCHA_ACQUIRE_BUDGET_MS;
     process.env.CAPTCHA_ACQUIRE_BUDGET_MS = "25";
     const responsePromise = proxyRequest(makeClientReq(), "openai", {
-      config: TEST_CONFIG, auth, fetchImpl: fetchMock as unknown as typeof fetch, captcha,
+      config: TEST_CONFIG, broker, fetchImpl: fetchMock as unknown as typeof fetch, captcha,
     });
     let guardTimer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -268,9 +283,8 @@ describe("proxyRequest — start-plan strict captcha acquisition (NOTEPAD 3.16.3
       return new Response(ANTHROPIC_OK, { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = new AuthManager();
-    auth.setOAuthCredential({ apiKey: "key-mock", provider: "zai", jwt: "jwt-mock" });
-    const resp = await proxyRequest(makeClientReq(), "openai", { config: TEST_CONFIG, auth, fetchImpl: fetchMock as any, captcha });
+    const broker = oauthBroker("key-mock.secret-mock", ["start-plan"]);
+    const resp = await proxyRequest(makeClientReq(), "openai", { config: TEST_CONFIG, broker, fetchImpl: fetchMock as any, captcha });
 
     expect(resp.status).toBe(200);
     expect(upstreamCalls).toBe(1);

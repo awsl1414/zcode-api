@@ -8,10 +8,16 @@
  * `zcode.z.ai/api/v1/ultra[-zai]/...`; the table is server-controlled and may
  * grow at any time, so resolution is generic.
  *
+ * 拉 mapping 的 fetch 也是出线点，走调用方给的 `EgressOptions`，即该账号
+ * 的代理：mapping 是给这台出口拉回来的，不能从另一台出口的缓存里拿。所以
+ * {@link EndpointRoutingService} 的 snapshot 按实例分，实例按 `(origin, identity,
+ * proxy)` 取。
+ *
  * Failure semantics are strictly fail-open: any fetch/parse error keeps the
  * previous snapshot (or none) and requests go to their original URL after a
  * cooldown. See `_reverse/NOTEPAD.md` "Server-side endpoint remapping".
  */
+import { fetchWithEgress, type EgressOptions } from "./egress.js";
 import { buildIdentityHeaders, identityCacheKey } from "./identity.js";
 import type { ProxyIdentity } from "../config/types.js";
 
@@ -41,6 +47,12 @@ export interface EndpointRoutingOptions {
   identity: ProxyIdentity;
   /** Resolves the `x-api-key` sent on the config fetch (coding-plan credential). */
   credential?: () => string | undefined;
+  /**
+   * 该实例的出口代理，用作下拉配置时的出线。单例
+   * {@link getDefaultEndpointRouting} 按代理一实例，所以这里也是它的 key 的一部分。
+   * {@link EndpointRoutingService.resolve} 的 `egress` 参数优先于它。
+   */
+  egress?: EgressOptions;
   fetchImpl?: typeof fetch;
   now?: () => number;
   successTtlMs?: number;
@@ -160,6 +172,7 @@ export class EndpointRoutingService {
   private readonly endpointOrigin: string;
   private readonly identity: ProxyIdentity;
   private readonly credential?: () => string | undefined;
+  private readonly egress?: EgressOptions;
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
   private readonly successTtlMs: number;
@@ -175,6 +188,7 @@ export class EndpointRoutingService {
     this.endpointOrigin = new URL(this.configUrl).origin;
     this.identity = opts.identity;
     this.credential = opts.credential;
+    this.egress = opts.egress;
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.now = opts.now ?? Date.now;
     this.successTtlMs = opts.successTtlMs ?? SUCCESS_TTL_MS;
@@ -188,9 +202,19 @@ export class EndpointRoutingService {
     return this.snapshot !== undefined;
   }
 
-  async getRequestVerificationConfig(credential?: string): Promise<RequestVerificationConfig | null> {
+  /**
+   * 当前快照里的「请求验证」配置（claim 的验证码判定要读它）。
+   *
+   * `egress` 只在**这次调用触发刷新**时用得上（快照还有效就直接返回，不出线）。
+   * claim 的运行时按账号建，所以它要传自己那个账号的出口 —— 否则「为这个账号做的
+   * 配置判定」会从本机 IP 出去，而紧接着的领取请求却走代理，两条线对不上。
+   */
+  async getRequestVerificationConfig(
+    credential?: string,
+    egress?: EgressOptions,
+  ): Promise<RequestVerificationConfig | null> {
     try {
-      await this.ensureFresh(credential);
+      await this.ensureFresh(credential, egress);
     } catch {
       // fail-open: read whatever snapshot we have
     }
@@ -205,8 +229,10 @@ export class EndpointRoutingService {
    * `zcodeJwt` (the `zcodejwttoken` slot) feeds the 3.16.2
    * `X-ZCode-Authorization` injection on flagged entries — omitted silently
    * when absent (the un-logged-in client behaves the same).
+   * `egress` is this request's exit (the account proxy); it wins over the
+   * instance-level one so a caller can hand in `lease.egress` per request.
    */
-  async resolve(url: string, credential?: string, zcodeJwt?: string): Promise<RoutedUrl> {
+  async resolve(url: string, credential?: string, zcodeJwt?: string, egress?: EgressOptions): Promise<RoutedUrl> {
     let parsed: URL;
     try {
       parsed = new URL(url);
@@ -214,7 +240,7 @@ export class EndpointRoutingService {
       return { routed: false, url };
     }
     try {
-      await this.ensureFresh(credential);
+      await this.ensureFresh(credential, egress);
     } catch {
       // fail-open: resolve without a snapshot
     }
@@ -226,27 +252,32 @@ export class EndpointRoutingService {
     return headers ? { routed: true, url: rewritten.href, headers } : { routed: true, url: rewritten.href };
   }
 
-  private async ensureFresh(credential?: string): Promise<void> {
+  private async ensureFresh(credential?: string, egress?: EgressOptions): Promise<void> {
     const now = this.now();
     if ((this.snapshot && this.snapshot.expiresAt > now) || this.retryAfter > now) return;
-    const pending = this.refreshPromise ?? this.beginRefresh(credential);
+    const pending = this.refreshPromise ?? this.beginRefresh(credential, egress ?? this.egress);
     await pending;
   }
 
-  private beginRefresh(credential?: string): Promise<void> {
-    const promise = this.refresh(credential).finally(() => {
+  private beginRefresh(credential?: string, egress?: EgressOptions): Promise<void> {
+    const promise = this.refresh(credential, egress).finally(() => {
       if (this.refreshPromise === promise) this.refreshPromise = undefined;
     });
     this.refreshPromise = promise;
     return promise;
   }
 
-  private async refresh(credential?: string): Promise<void> {
+  private async refresh(credential?: string, egress?: EgressOptions): Promise<void> {
     // 3.12.3: the config fetch's sourceHeaders come from `V6n` → the `TV`
     // context set (no X-ZCode-Agent, optional X-Device-Mid); the request adds
     // x-api-key + Accept.
+    //
+    // `X-Device-Mid` 这一处**不发**：deviceMid 是账号属性，而本服务是进程级实例、
+    // 按全局 identity 做 key（`identityCacheKey`），拿不到“本次是哪个账号”。官方
+    // 客户端拉 agent configs 时这个头本来就是可选的，所以缺它不会改变上游行为；
+    // 等 endpoint-routing 改成按账号分实例，这里才能传 `accountDeviceMid(account)`。
     const headers: Record<string, string> = {
-      ...buildIdentityHeaders(this.identity),
+      ...buildIdentityHeaders(this.identity, ""),
       Accept: "application/json",
     };
     const key = credential ?? this.credential?.();
@@ -255,12 +286,12 @@ export class EndpointRoutingService {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
     try {
-      const resp = await this.fetchImpl(this.configUrl, {
+      const resp = await fetchWithEgress(this.fetchImpl, this.configUrl, {
         method: "GET",
         headers,
         redirect: "manual",
         signal: controller.signal,
-      });
+      }, egress);
       if (resp.status < 200 || resp.status >= 300) throw new Error(`agent_configs_http_${resp.status}`);
       const parsed = await resp.json() as unknown;
       const envelope = parsed as { code?: unknown; data?: unknown };
@@ -306,27 +337,37 @@ export class EndpointRoutingService {
   }
 }
 
-let defaultRouting: EndpointRoutingService | null = null;
-let defaultRoutingKey = "";
+let defaultRoutingInstances: Map<string, EndpointRoutingService> | null = null;
 
 /**
- * Process-wide routing service, shared across requests (snapshot cache).
- * Recreated when the relevant config values change (Android `setConfig`) —
- * keyed on the full identity because the service embeds it in config-fetch
- * headers. Returns `null` when disabled.
+ * Process-wide routing services, one per `(origin, identity, proxy)` slot.
+ *
+ * 按代理分实例，不做「单例 + 整份重建」：多账号加每账号代理是常态，
+ * 重建会让账号 A 与账号 B 交替冲掉对方的 snapshot，每个请求都得重拉一次那个有 TTL
+ * 的 mapping 接口。
+ *
+ * 内存边界是「配置面里 `origin` 的写法数 × 不同 identity 数 × 不同代理数」，三者都是
+ * 配置里的个位数到几十，不需要 LRU。
+ *
+ * Returns `null` when disabled.
  */
-export function getDefaultEndpointRouting(config: {
-  endpointRouting: { enabled: boolean; origin: string };
-  identity: ProxyIdentity;
-}): EndpointRoutingService | null {
+export function getDefaultEndpointRouting(
+  config: {
+    endpointRouting: { enabled: boolean; origin: string };
+    identity: ProxyIdentity;
+  },
+  egress?: EgressOptions,
+): EndpointRoutingService | null {
   if (!config.endpointRouting.enabled) return null;
-  const key = `${config.endpointRouting.origin}\n${identityCacheKey(config.identity)}`;
-  if (!defaultRouting || key !== defaultRoutingKey) {
-    defaultRouting = new EndpointRoutingService({
-      origin: config.endpointRouting.origin,
-      identity: config.identity,
-    });
-    defaultRoutingKey = key;
-  }
-  return defaultRouting;
+  if (!defaultRoutingInstances) defaultRoutingInstances = new Map();
+  const key = `${config.endpointRouting.origin}\n${identityCacheKey(config.identity)}\n${egress?.proxyUrl ?? "direct"}`;
+  const cached = defaultRoutingInstances.get(key);
+  if (cached) return cached;
+  const created = new EndpointRoutingService({
+    origin: config.endpointRouting.origin,
+    identity: config.identity,
+    egress,
+  });
+  defaultRoutingInstances.set(key, created);
+  return created;
 }

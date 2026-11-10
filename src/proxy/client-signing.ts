@@ -18,7 +18,7 @@
  * unsigned; two consecutive 401 VERIFY_* rejections → permanent bypass for
  * that (origin, credential) pair.
  *
- * Enablement mirrors ZCode 3.15.1 (`_reverse/NOTEPAD.md` §B): the client no
+ * Enablement mirrors ZCode 3.15.1: the client no
  * longer probes `agent/configs` for `data.codingPlanSignature` — signing is a
  * static client-side rule (`TUs` requiresClientRequestSigning): coding-plan
  * credentials (individual/team/API-key) are always signed; start-plan,
@@ -28,16 +28,28 @@
  * start-plan gateway + off-peak paths as defense-in-depth. The 3.12.3–3.14.4
  * gate probe (GET /api/v1/agent/configs, 1h TTL) was removed in lockstep.
  *
- * Credentials without the `{apiKeyId}.{apiKeySecret}` separator (legacy
- * bigmodel keys issued before the copy endpoint returned secretKeys) are
- * silently skipped — the client hard-throws there; skipping is a deliberate
- * fail-open deviation. Both providers now issue two-part keys, which sign
- * normally.
+ * 握手与 bigmodel project token 铸造也是出线点，走调用方给的
+ * `EgressOptions`，即该账号的代理。签名材料按凭据铸造，但握手经过的出口本身属于
+ * 风控面，所以一槽的 key 是 `(origin, credential, proxy)`：同一进程里换代理后必须
+ * 重新握手，不复用上一台代理拉来的私钥材料。
+ *
+ * Credentials must be two-part (`{apiKeyId}.{apiKeySecret}`) — both providers
+ * issue that form; a separator-less credential is corrupt and hard-throws
+ * (5.0 contract, no legacy-form exemption).
  *
  * Full protocol: `_reverse/NOTEPAD.md` "Client Request Signing V4".
  */
-import { DEFAULT_APP_VERSION } from "../config/loader.js";
 import type { UpstreamHeaderPair } from "./upstream.js";
+import { fetchWithEgress, type EgressOptions } from "./egress.js";
+import { logger } from "../log/index.js";
+
+/**
+ * 客户端签名层的日志。
+ *
+ * `onEvent` 报的是 fail-open 决定（握手失败、VERIFY 免签），每种每条凭据只报一次。
+ * 旧实现直接 `console.log`：这些是**降级**，用 `warn` 才与语义相符。
+ */
+const log = logger("proxy");
 
 const HANDSHAKE_PATH = "/api/paas/c1f3a7e2/v2/client";
 const APP_ID = "zcode";
@@ -51,6 +63,21 @@ const HANDSHAKE_METHOD = "get_sign_key";
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 /** Negative cache after a failed project-token mint (stale token / biz error). */
 const MINT_FAILURE_COOLDOWN_MS = 60_000;
+/**
+ * 每个凭据一槽的缓存上限。
+ *
+ * `projectJwt` / `mintNegUntil` / `mintInFlight` 全部按 `credentialKey` 分槽。
+ * 单字段版本在多账号 bigmodel 下会互相踢：A 铸造后 B 的请求发现槽里的
+ * credentialKey 不等，就丢掉 A 的 JWT 重新铸，A 的下一个请求又丢掉 B 的，两个
+ * 账号每次请求都重新铸一次。
+ *
+ * 容量取 32 的理由：账号数在生产部署里是个位数（一个进程服务用户自己的几个
+ * 账号），32 明显大于任何真实值；上限的唯一意义是防止「每次
+ * 请求带一个新凭据」把三张表撑成无界泄漏。满时按插入顺序淘汰最旧的一槽。
+ */
+const CREDENTIAL_SLOT_CAP = 32;
+/** 缓存 JWT 的提前失效窗口：离 exp 不足 5 分钟就重新铸（mirror 官方客户端的续期提前量）。 */
+const PROJECT_JWT_EXPIRY_MARGIN_MS = 5 * 60_000;
 const VERIFY_SIGNATURE_INVALID = "VERIFY_SIGNATURE_INVALID";
 const VERIFY_APIKEY_EXPIRED = "VERIFY_APIKEY_EXPIRED";
 
@@ -280,11 +307,15 @@ export class ClientSigningManager {
   private readonly now: () => number;
   private readonly states = new Map<string, SignerState>();
   private readonly notedKeys = new Set<string>();
-  /** Cached project-access JWT (bigmodel OAuth): keyed by the api credential. */
-  private projectJwt: { credentialKey: string; jwt: string; expMs: number } | null = null;
-  /** Negative cache after a failed project-token mint (stale OAuth token etc.). */
-  private mintNegUntil = 0;
-  private mintInFlight: Promise<ParsedSigningCredential | undefined> | null = null;
+  /**
+   * 已铸造的 project-access JWT（bigmodel OAuth），`Map<credentialKey, …>`：
+   * 一个凭据一槽。
+   */
+  private readonly projectJwt = new Map<string, { jwt: string; expMs: number }>();
+  /** 铸造失败的负缓存，`Map<credentialKey, until>`：一个账号铸不出来不该把别的账号冻结 60 秒。 */
+  private readonly mintNegUntil = new Map<string, number>();
+  /** 在飞的铸造，`Map<credentialKey, promise>`：同一凭据并发只铸一次。 */
+  private readonly mintInFlight = new Map<string, Promise<ParsedSigningCredential | undefined>>();
   onEvent?: (message: string) => void;
 
   constructor(opts: {
@@ -303,8 +334,13 @@ export class ClientSigningManager {
    * bypass, non-signable credential, missing session id, or handshake
    * failure. Never throws.
    */
-  async sign(url: string, pairs: UpstreamHeaderPair[], cred: SigningCredential): Promise<UpstreamHeaderPair[]> {
-    return (await this.signWithStatus(url, pairs, cred)).pairs;
+  async sign(
+    url: string,
+    pairs: UpstreamHeaderPair[],
+    cred: SigningCredential,
+    egress?: EgressOptions,
+  ): Promise<UpstreamHeaderPair[]> {
+    return (await this.signWithStatus(url, pairs, cred, egress)).pairs;
   }
 
   /**
@@ -313,8 +349,16 @@ export class ClientSigningManager {
    * returned array reference. Cheap local eligibility checks (credential
    * separator, session id) run BEFORE the handshake fetch so non-signable
    * credentials never pay for network round-trips.
+   *
+   * `egress` 是这个账号的出口：握手与 project token 铸造从它出去，它同时是
+   * 签名槽 key 的一部分，所以同一进程里换代理会重新握手。
    */
-  async signWithStatus(url: string, pairs: UpstreamHeaderPair[], cred: SigningCredential): Promise<SignOutcome> {
+  async signWithStatus(
+    url: string,
+    pairs: UpstreamHeaderPair[],
+    cred: SigningCredential,
+    egress?: EgressOptions,
+  ): Promise<SignOutcome> {
     let parsed: URL;
     try {
       parsed = new URL(url);
@@ -325,14 +369,15 @@ export class ClientSigningManager {
     if (isUnsignedPath(parsed.pathname)) return { pairs, signed: false };
     if (pairs.some(([k]) => k.toLowerCase() === "x-client-sig")) return { pairs, signed: false };
 
-    const stateKey = `${parsed.origin}\n${cred.credential}`;
+    const stateKey = this.stateKeyFor(parsed.origin, cred.credential, egress);
     const state = this.stateFor(stateKey);
     if (state.bypass) return { pairs, signed: false };
 
-    const parsedCred = await this.resolveParsedCredential(cred, stateKey);
+    const parsedCred = await this.resolveParsedCredential(cred, stateKey, egress);
     if (!parsedCred) {
-      this.noteOnce(stateKey, "credential has no {apiKeyId}.{apiKeySecret} separator — signing skipped");
-      return { pairs, signed: false };
+      // 5.0 契约：凭据必须是 `{apiKeyId}.{apiKeySecret}` 两段式（两家 provider 均
+      // 如此签发）。无分隔符 = 损坏凭据，对齐客户端 hard-throw，不做签名豁免。
+      throw new Error("credential has no {apiKeyId}.{apiKeySecret} separator");
     }
 
     const sessionId = findHeader(pairs, "x-session-id")?.trim();
@@ -343,7 +388,7 @@ export class ClientSigningManager {
 
     let privateKey: CryptoKey;
     try {
-      privateKey = await this.ensurePrivateKey(state, parsedCred, parsed.origin);
+      privateKey = await this.ensurePrivateKey(state, parsedCred, parsed.origin, egress);
     } catch {
       this.noteOnce(stateKey, "signing handshake failed — sending unsigned");
       this.invalidateState(stateKey);
@@ -414,20 +459,19 @@ export class ClientSigningManager {
     }
   }
 
-  /** Drop the cached signing key for a (origin, credential) pair after a VERIFY rejection. */
-  invalidate(url: string, credential: string): void {
+  /** Drop the cached signing key for a (origin, credential, proxy) slot after a VERIFY rejection. */
+  invalidate(url: string, credential: string, egress?: EgressOptions): void {
     try {
-      const stateKey = `${new URL(url).origin}\n${credential}`;
-      this.invalidateState(stateKey);
+      this.invalidateState(this.stateKeyFor(new URL(url).origin, credential, egress));
     } catch {
       // unreachable URL — nothing cached under it
     }
   }
 
-  /** Permanently stop signing for a (origin, credential) pair (two VERIFY rejections). */
-  setBypass(url: string, credential: string): void {
+  /** Permanently stop signing for a (origin, credential, proxy) slot (two VERIFY rejections). */
+  setBypass(url: string, credential: string, egress?: EgressOptions): void {
     try {
-      const stateKey = `${new URL(url).origin}\n${credential}`;
+      const stateKey = this.stateKeyFor(new URL(url).origin, credential, egress);
       const state = this.stateFor(stateKey);
       state.bypass = true;
       this.invalidateState(stateKey);
@@ -435,6 +479,17 @@ export class ClientSigningManager {
     } catch {
       // unreachable URL
     }
+  }
+
+  /**
+   * 签名状态槽的 key：`(origin, credential, proxy)`。
+   *
+   * 三处（sign 路径、{@link invalidate}、{@link setBypass}）必须共用它，否则失效
+   * 操作打不到 `sign` 建的那一槽。代理维度对应 `EgressOptions.proxyUrl`，直连写
+   * `direct`。
+   */
+  private stateKeyFor(origin: string, credential: string, egress?: EgressOptions): string {
+    return `${origin}\n${credential}\n${egress?.proxyUrl ?? "direct"}`;
   }
 
   private invalidateState(stateKey: string): void {
@@ -455,52 +510,77 @@ export class ClientSigningManager {
   }
 
   /**
+   * 有界写入：同一 key 重写算「最新」（先 delete 再 set），超出
+   * `CREDENTIAL_SLOT_CAP` 时按插入顺序淘汰最旧的一槽。
+   */
+  private putSlot<K, V>(map: Map<K, V>, key: K, value: V): void {
+    map.delete(key);
+    map.set(key, value);
+    while (map.size > CREDENTIAL_SLOT_CAP) {
+      const oldest = map.keys().next();
+      if (oldest.done) break;
+      map.delete(oldest.value);
+    }
+  }
+
+  /**
    * Resolve the signing credential form. Bigmodel OAuth logins mint a
    * project-access JWT from the raw OAuth token (live-verified 2026-10-12:
    * the apiKey form handshakes 200 but its privateCipher can never be
    * decrypted on bigmodel) and cache it until 5 minutes before the JWT exp.
    * Any mint failure falls back to the apiKey form (unsigned via the usual
    * ladder). Z.AI keys pass through unchanged (apiKey form, live-verified).
+   *
+   * JWT / 负缓存 / 在飞铸造三个槽都按 `cred.credential` 分槽：混用一个槽
+   * 会让两个 bigmodel 账号每次请求都丢掉对方的缓存重新铸。
    */
-  private async resolveParsedCredential(cred: SigningCredential, stateKey: string): Promise<ParsedSigningCredential | undefined> {
+  private async resolveParsedCredential(
+    cred: SigningCredential,
+    stateKey: string,
+    egress?: EgressOptions,
+  ): Promise<ParsedSigningCredential | undefined> {
     const direct = parseSigningCredentialForm(cred.credential);
     if (direct?.handshakeField === "accessToken") return direct;
     if (!cred.oauthAccessToken || cred.provider !== "bigmodel") return direct;
 
+    const credentialKey = cred.credential;
     const now = this.now();
-    if (this.projectJwt && this.projectJwt.credentialKey === cred.credential && this.projectJwt.expMs - 5 * 60_000 > now) {
-      const cached = parseSigningCredentialForm(this.projectJwt.jwt);
-      if (cached) return cached;
-      this.projectJwt = null; // stale/malformed cache entry — fall through to a fresh mint
+    const cached = this.projectJwt.get(credentialKey);
+    if (cached && cached.expMs - PROJECT_JWT_EXPIRY_MARGIN_MS > now) {
+      const parsed = parseSigningCredentialForm(cached.jwt);
+      if (parsed) return parsed;
+      this.projectJwt.delete(credentialKey); // stale/malformed cache entry — fall through to a fresh mint
     }
-    if (now < this.mintNegUntil) return direct;
-    if (this.mintInFlight) return this.mintInFlight;
+    const negUntil = this.mintNegUntil.get(credentialKey) ?? 0;
+    if (now < negUntil) return direct;
+    const inFlight = this.mintInFlight.get(credentialKey);
+    if (inFlight) return inFlight;
 
-    const promise = this.mintProjectJwt(cred.oauthAccessToken, direct?.apiKeyId)
+    const promise = this.mintProjectJwt(cred.oauthAccessToken, direct?.apiKeyId, cred.appVersion, egress)
       .then((minted) => {
         if (!minted) {
           // negative-cache so a stale OAuth token can't burn two doomed
           // fetches on every request (mirrors the highspeed manager's gate)
-          this.mintNegUntil = this.now() + MINT_FAILURE_COOLDOWN_MS;
+          this.putSlot(this.mintNegUntil, credentialKey, this.now() + MINT_FAILURE_COOLDOWN_MS);
           return direct;
         }
         const parsed = parseSigningCredentialForm(minted.jwt);
         if (!parsed) {
           // strict parse rejected the minted token — don't cache it, don't
           // disable signing; the apiKey form stays available
-          this.mintNegUntil = this.now() + MINT_FAILURE_COOLDOWN_MS;
+          this.putSlot(this.mintNegUntil, credentialKey, this.now() + MINT_FAILURE_COOLDOWN_MS);
           this.noteOnce("pt-parse", "minted project token failed strict parse — falling back to apiKey form");
           return direct;
         }
-        this.projectJwt = { credentialKey: cred.credential, jwt: minted.jwt, expMs: minted.expMs };
+        this.putSlot(this.projectJwt, credentialKey, { jwt: minted.jwt, expMs: minted.expMs });
         // the private key is keyed to the previous secret — force a re-handshake
         this.invalidateState(stateKey);
         return parsed;
       })
       .finally(() => {
-        if (this.mintInFlight === promise) this.mintInFlight = null;
+        if (this.mintInFlight.get(credentialKey) === promise) this.mintInFlight.delete(credentialKey);
       });
-    this.mintInFlight = promise;
+    this.putSlot(this.mintInFlight, credentialKey, promise);
     return promise;
   }
 
@@ -511,20 +591,25 @@ export class ClientSigningManager {
    * excluded), then `…/api_keys/{apiKeyId}/access_tokens` (Bearer) mints the
    * `project_access` JWT.
    */
-  private async mintProjectJwt(oauthAccessToken: string, apiKeyId: string | undefined): Promise<{ jwt: string; expMs: number } | null> {
+  private async mintProjectJwt(
+    oauthAccessToken: string,
+    apiKeyId: string | undefined,
+    appVersion: string,
+    egress?: EgressOptions,
+  ): Promise<{ jwt: string; expMs: number } | null> {
     if (!apiKeyId) {
-      this.noteOnce("pt-key", "project token mint skipped: credential has no apiKeyId segment");
-      return null;
+      // 5.0 契约：凭据两段式必含 apiKeyId segment（见 sign() 同款裁决）。
+      throw new Error("credential has no apiKeyId segment");
     }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15_000);
     try {
       const bare = oauthAccessToken.startsWith("Bearer ") ? oauthAccessToken.slice(7).trim() : oauthAccessToken;
-      const infoResp = await this.fetchImpl("https://bigmodel.cn/api/biz/customer/getCustomerInfo", {
+      const infoResp = await fetchWithEgress(this.fetchImpl, "https://bigmodel.cn/api/biz/customer/getCustomerInfo", {
         headers: { Authorization: bare, "Content-Type": "application/json" },
         redirect: "manual",
         signal: controller.signal,
-      });
+      }, egress);
       const info = await infoResp.json() as {
         data?: {
           organizations?: Array<{
@@ -542,13 +627,13 @@ export class ClientSigningManager {
         this.noteOnce("pt-project", "project token mint failed: no usable org/project in getCustomerInfo (re-login may help)");
         return null;
       }
-      const ptResp = await this.fetchImpl(`https://bigmodel.cn/api/biz/v1/organization/${encodeURIComponent(org.organizationId)}/projects/${encodeURIComponent(project.projectId)}/api_keys/${encodeURIComponent(apiKeyId)}/access_tokens`, {
+      const ptResp = await fetchWithEgress(this.fetchImpl, `https://bigmodel.cn/api/biz/v1/organization/${encodeURIComponent(org.organizationId)}/projects/${encodeURIComponent(project.projectId)}/api_keys/${encodeURIComponent(apiKeyId)}/access_tokens`, {
         method: "POST",
         headers: { Authorization: `Bearer ${bare}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ clientType: "zcode", clientVersion: DEFAULT_APP_VERSION }),
+        body: JSON.stringify({ clientType: "zcode", clientVersion: appVersion }),
         redirect: "manual",
         signal: controller.signal,
-      });
+      }, egress);
       const pt = await ptResp.json() as { code?: number; data?: { accessToken?: string; enabled?: boolean } };
       const jwt = pt.data?.accessToken;
       if (pt.code !== 200 || !jwt) {
@@ -574,11 +659,12 @@ export class ClientSigningManager {
     state: SignerState,
     parsedCred: ParsedSigningCredential,
     origin: string,
+    egress?: EgressOptions,
   ): Promise<CryptoKey> {
     if (state.privKey) return state.privKey;
     if (state.handshake) return state.handshake;
     const epoch = state.epoch;
-    const handshake = this.performHandshake(parsedCred, origin).then((key) => {
+    const handshake = this.performHandshake(parsedCred, origin, egress).then((key) => {
       if (state.epoch !== epoch) throw new Error("signing key changed during handshake");
       state.privKey = key;
       return key;
@@ -591,7 +677,11 @@ export class ClientSigningManager {
     return handshake;
   }
 
-  private async performHandshake(parsedCred: ParsedSigningCredential, origin: string): Promise<CryptoKey> {
+  private async performHandshake(
+    parsedCred: ParsedSigningCredential,
+    origin: string,
+    egress?: EgressOptions,
+  ): Promise<CryptoKey> {
     const ts = String(Date.now());
     const nonce = randomHex(NONCE_BYTES);
     const sig = await handshakeSignature(
@@ -613,13 +703,13 @@ export class ClientSigningManager {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), HANDSHAKE_TIMEOUT_MS);
     try {
-      const resp = await this.fetchImpl(`${origin}${HANDSHAKE_PATH}`, {
+      const resp = await fetchWithEgress(this.fetchImpl, `${origin}${HANDSHAKE_PATH}`, {
         method: "POST",
         headers: { Authorization: authHeader, "Content-Type": "application/json" },
         body: JSON.stringify({ [bodyKey]: authValue, nonce, sig, ts }),
         redirect: "manual",
         signal: controller.signal,
-      });
+      }, egress);
       if (resp.status !== 200) throw new Error(`handshake_http_${resp.status}`);
       const envelope = await resp.json() as { code?: unknown; msg?: unknown; data?: { privateCipher?: unknown } };
       if (envelope.code === 500) throw new Error("handshake_server_500");
@@ -647,6 +737,8 @@ export interface SendWithSigningParams {
   /** Raw provider OAuth token — enables the project-access JWT signing form (bigmodel). */
   oauthAccessToken?: string;
   provider?: "zai" | "bigmodel";
+  /** 该账号的出口代理：握手与 project token 铸造都从它出去。*/
+  egress?: EgressOptions;
   send: (headerPairs: UpstreamHeaderPair[]) => Promise<Response>;
   debug?: (message: string) => void;
 }
@@ -660,21 +752,21 @@ export async function sendWithClientSigning(
   signer: ClientSigningManager | null,
   params: SendWithSigningParams,
 ): Promise<Response> {
-  const { url, headerPairs, credential, appVersion, oauthAccessToken, provider, send, debug } = params;
+  const { url, headerPairs, credential, appVersion, oauthAccessToken, provider, egress, send, debug } = params;
   if (!signer) return send(headerPairs);
 
   const signingCred = { credential, appVersion, ...(oauthAccessToken ? { oauthAccessToken } : {}), ...(provider ? { provider } : {}) };
-  const first = await signer.signWithStatus(url, headerPairs, signingCred);
+  const first = await signer.signWithStatus(url, headerPairs, signingCred, egress);
   let resp = await send(first.pairs);
   if (!first.signed || !await signer.isVerifyFailure(resp)) return resp;
 
   debug?.("401 VERIFY_SIGNATURE_* — invalidating signing key and retrying once");
-  signer.invalidate(url, credential);
-  const second = await signer.signWithStatus(url, headerPairs, signingCred);
+  signer.invalidate(url, credential, egress);
+  const second = await signer.signWithStatus(url, headerPairs, signingCred, egress);
   resp = await send(second.pairs);
   if (!second.signed || !await signer.isVerifyFailure(resp)) return resp;
 
-  signer.setBypass(url, credential);
+  signer.setBypass(url, credential, egress);
   debug?.("401 VERIFY_SIGNATURE_* twice — sending unsigned (signing bypassed)");
   return send(headerPairs);
 }
@@ -695,7 +787,7 @@ export function getDefaultClientSigning(config: {
     defaultSigner = new ClientSigningManager({
       // Fail-open decisions (handshake failure, VERIFY bypass) are otherwise
       // silent in production — surface each once per (origin, cred).
-      onEvent: (message) => console.log(message),
+      onEvent: (message) => log.warn(message),
     });
   }
   return defaultSigner;

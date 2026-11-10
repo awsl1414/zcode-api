@@ -9,6 +9,11 @@
  *      (matches `@ai-sdk/openai-compatible` default in `_reverse/zcode.cjs`).
  *   2. start-plan → prepend ZCode gateway system blocks. OpenAI upstream gets
  *      system messages; Anthropic-shaped input gets the Anthropic `system` field.
+ *      Both routes run the client's own system text through the SAME
+ *      `normalizeClientSystem` identity normalizer (the third layer of the
+ *      client-identity normalization):
+ *      Anthropic via block 3, OpenAI via the client's `system`/`developer`
+ *      messages (which used to pass through verbatim).
  *   3. Anthropic format → clear existing `cache_control` markers on all
  *      non-system messages, then add `{ type: "ephemeral" }` to the last
  *      content block of the last non-system message (mirrors the bundle's
@@ -18,11 +23,24 @@
  *   4. Anthropic format + `ctx.metadataUserId` set → inject
  *      `metadata: { user_id }` (bundle `E2e`/`UIo` device/session blob —
  *      value assembled by the caller via buildAnthropicMetadataUserId).
+ *   5. Anthropic format + `ctx.effortOverride` set → rewrite the request to
+ *      the panel-configured reasoning tier (via the shared
+ *      applyEffortOverrideToBody). Only the Anthropic branch needs it: the
+ *      OpenAI/Responses translation chains converge to Anthropic shape
+ *      BEFORE transformRequestBody runs, and the Anthropic passthrough body
+ *      is already client-shaped. Every upstream-bound call site passes the
+ *      tier resolved by provider/effort-override.ts (which also lands it on
+ *      the request record, so resolve and rewrite cannot disagree):
+ *      proxy/handler.ts (chat + Anthropic passthrough), proxy/
+ *      responses-handler.ts (the /v1/responses route assembles its own
+ *      outbound body and does NOT go through proxyRequest), and
+ *      async/handler.ts (both off-peak inbound protocols).
  *
  * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
  */
 import type { Format } from "../translator/types.js";
-import { buildStartPlanSystem, buildCurrentDateMessage } from "./system-prompt.js";
+import { applyEffortOverrideToBody, type EffortOverride } from "../provider/effort-override.js";
+import { buildStartPlanSystem, buildCurrentDateMessage, normalizeClientSystem } from "./system-prompt.js";
 
 interface TransformContext {
   format: Format;
@@ -33,14 +51,24 @@ interface TransformContext {
    * carries the account uuid here (account_uuid is hardcoded "" upstream).
    */
   metadataUserId?: string;
-  /** When true (start-plan), prepend ZCode gateway system blocks. */
-  startPlan?: boolean;
+  /**
+   * 代填 ZCode 网关的 system 三块 + 客户端 system 身份归一。
+   * 取值来自路由事实 `RouteSpec.injectsZcodeSystemPrompt`（只有 `start-plan` 为真：
+   * zcode.z.ai 网关缺身份块回 3012）；不开仿冒层的路由因此天然不注入。
+   */
+  injectZcodeSystem?: boolean;
   /**
    * Active upstream provider — feeds the powered-by line's `{providerId}/`
    * prefix (bundle `p2`: zai→"zai-api", bigmodel→"bigmodel-api"). Always set
-   * by production callers alongside `startPlan`.
+   * by production callers alongside `injectZcodeSystem`.
    */
   provider?: "zai" | "bigmodel";
+  /**
+   * 面板推理强度覆盖命中时的档位（resolve 结果）。undefined = 透传，
+   * body 一个字不改。只对 Anthropic 形态的 body 生效——OpenAI/Responses 入站
+   * 在进本函数前已归一为 Anthropic（见文件头第 5 条），出线的 body 只此一种。
+   */
+  effortOverride?: EffortOverride;
 }
 
 /**
@@ -61,19 +89,22 @@ export function transformRequestBody(body: string | undefined, ctx: TransformCon
   let modified = false;
 
   if (ctx.format === "openai") {
-    if (ctx.startPlan) {
+    if (ctx.injectZcodeSystem) {
       modified = applyStartPlanOpenAISystem(parsed as Record<string, unknown>) || modified;
     }
     modified = applyStreamOptionsIncludeUsage(parsed as Record<string, unknown>) || modified;
   }
   if (ctx.format === "anthropic") {
     const obj = parsed as Record<string, unknown>;
-    if (ctx.startPlan) {
+    if (ctx.injectZcodeSystem) {
       modified = applyStartPlanSystem(obj) || modified;
     }
     modified = applyAnthropicCacheControl(obj) || modified;
     if (ctx.metadataUserId) {
       modified = applyAnthropicUserId(obj, ctx.metadataUserId) || modified;
+    }
+    if (ctx.effortOverride !== undefined) {
+      modified = applyEffortOverrideToBody(obj, ctx.effortOverride).changed || modified;
     }
   }
 
@@ -204,9 +235,31 @@ function applyStartPlanSystem(body: Record<string, unknown>): boolean {
   return true;
 }
 
+/**
+ * OpenAI 的 system 系角色。`developer` 与 `system` 在翻译器里同样被折进上游的
+ * `system` 段（`openai-to-anthropic.ts:34`：`m.role === "system" || m.role ===
+ * "developer"`），所以两者的文本都会原样到上游，必须一起过归一。
+ */
+const OPENAI_SYSTEM_ROLES: ReadonlySet<string> = new Set(["system", "developer"]);
+
+/**
+ * start-plan（OpenAI 路由）：插官方 system 段 + 归一客户端自己的 system 消息。
+ *
+ * 身份归一的第三层（路由覆盖）：此前只往 `messages` 前插官方段，**完全不碰客户端
+ * system 消息**，走 `/v1/chat/completions` 的客户端（Cline / Roo / Kilo 这类多数走
+ * OpenAI 格式）身份句 100% 原样出站（`docs/research/client-fingerprints.md` 记的是这条路由级缺口）。
+ * 现在客户端 system 文本与 Anthropic 路由的 block 3 共用
+ * {@link normalizeClientSystem} —— 同一函数、同一开关，不会分叉。
+ */
 function applyStartPlanOpenAISystem(body: Record<string, unknown>): boolean {
   const messages = body.messages;
   if (!Array.isArray(messages)) return false;
+
+  for (const msg of messages) {
+    if (!isPlainObject(msg)) continue;
+    if (typeof msg.role !== "string" || !OPENAI_SYSTEM_ROLES.has(msg.role)) continue;
+    normalizeClientSystemMessage(msg);
+  }
 
   const official = buildStartPlanSystem(undefined).map((block) => ({
     role: "system",
@@ -214,4 +267,21 @@ function applyStartPlanOpenAISystem(body: Record<string, unknown>): boolean {
   }));
   body.messages = [...official, ...messages];
   return true;
+}
+
+/**
+ * 归一条客户端 system 消息的文本：`content` 是字符串时直接归，是内容块数组时只归
+ * `type: "text"` 块的 `text`（其他块原样保留）。
+ */
+function normalizeClientSystemMessage(msg: Record<string, unknown>): void {
+  if (typeof msg.content === "string") {
+    msg.content = normalizeClientSystem(msg.content);
+    return;
+  }
+  if (!Array.isArray(msg.content)) return;
+  for (const part of msg.content) {
+    if (!isPlainObject(part)) continue;
+    if (part.type !== "text" || typeof part.text !== "string") continue;
+    part.text = normalizeClientSystem(part.text);
+  }
 }

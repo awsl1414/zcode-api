@@ -7,18 +7,44 @@ import { createServer } from "node:net";
 import { buildUpstreamRequest, buildUpstreamHeaderPairs, buildUpstreamURL, buildAuthHeaders } from "./upstream.js";
 import { sendOrderedUpstreamRequest } from "./ordered-transport.js";
 import { buildZcodeTraceHeaders } from "./trace-headers.js";
-import { proxyRequest, errorResponse, shouldUseOrderedTransport, stripAutoDecodedEncoding } from "./handler.js";
-import { ZAI_PROVIDER, BIGMODEL_PROVIDER } from "../provider/providers.js";
+import { proxyRequest } from "./handler.js";
+import { errorResponse, shouldUseOrderedTransport } from "./http-io.js";
+/** 官方 Anthropic 端点（与 `config/loader.ts` 的 DEFAULTS 逐字一致）。*/
+const ZAI_ANTHROPIC_BASE = "https://api.z.ai/api/anthropic";
+const BIGMODEL_ANTHROPIC_BASE = "https://open.bigmodel.cn/api/anthropic";
 import type { Credential } from "../auth/types.js";
-import type { ProxyConfig, ProxyIdentity } from "../config/types.js";
-import { AuthManager } from "../auth/manager.js";
+import type { ProxyConfig, ProxyIdentity, BetaPolicy } from "../config/types.js";
+import { brokerFor, inMemoryAccounts } from "../accounts/testing.js";
 
-/** AuthManager with a preset oauth credential (replaces the removed apikey mode). */
-function oauthAuth(key = "testkey.testsecret"): AuthManager {
+/**
+ * Broker backed by an in-memory single account (replaces the removed
+ * `AuthManager` helper: 5.0 resolves credentials through `broker.acquire()`).
+ */
+function oauthBroker(key = "testkey.testsecret") {
   const [apiKey, secret] = key.split(".");
-  const auth = new AuthManager();
-  auth.setOAuthCredential(secret ? { apiKey, secret, provider: "zai" } : { apiKey, provider: "zai" });
-  return auth;
+  return brokerFor({
+    kind: "zhipu-account",
+    provider: "zai",
+    apiKey,
+    ...(secret ? { secret } : {}),
+    identity: { targetType: "PERSONAL", deviceMid: "test-device-mid" },
+  }).broker;
+}
+
+/** start-plan 账号：路由白名单只有 start-plan，凭据带 plan JWT。*/
+function startPlanBroker(jwt = "jwt-mock") {
+  return brokerFor({
+    kind: "zhipu-account",
+    provider: "zai",
+    apiKey: "dummy",
+    jwt,
+    identity: { targetType: "PERSONAL", deviceMid: "test-device-mid" },
+  }, ["start-plan"]).broker;
+}
+
+/** 没有账号的 broker：验证"未登录"的 503。*/
+function noAccountBroker() {
+  return inMemoryAccounts([]).broker;
 }
 
 const ZAI_CRED: Credential = { apiKey: "testkey", secret: "testsecret", provider: "zai" };
@@ -26,8 +52,11 @@ const BIGMODEL_CRED: Credential = { apiKey: "bmkey", provider: "bigmodel" };
 
 const IDENTITY: ProxyIdentity = {
   appVersion: "test-1.0.0",
+  appVersionSource: "default",
   sourceTitle: "cli",
   refererOrigin: "https://zcode.z.ai",
+  betaPolicy: "drop",
+  betaAllowlist: [],
 };
 
 function makeClientReq(body: string, headers: Record<string, string> = {}): Request {
@@ -70,28 +99,18 @@ async function captureOrderedRequest(headers: Array<[string, string]>): Promise<
 
 describe("buildUpstreamURL", () => {
   it("builds Anthropic URL for Z.AI", () => {
-    expect(buildUpstreamURL("anthropic", ZAI_PROVIDER)).toBe(
+    expect(buildUpstreamURL(ZAI_ANTHROPIC_BASE)).toBe(
       "https://api.z.ai/api/anthropic/v1/messages",
     );
   });
 
-  it("builds OpenAI URL for Z.AI", () => {
-    expect(buildUpstreamURL("openai", ZAI_PROVIDER)).toBe(
-      "https://api.z.ai/api/coding/paas/v4/chat/completions",
-    );
-  });
 
   it("builds Anthropic URL for Bigmodel", () => {
-    expect(buildUpstreamURL("anthropic", BIGMODEL_PROVIDER)).toBe(
+    expect(buildUpstreamURL(BIGMODEL_ANTHROPIC_BASE)).toBe(
       "https://open.bigmodel.cn/api/anthropic/v1/messages",
     );
   });
 
-  it("builds OpenAI URL for Bigmodel", () => {
-    expect(buildUpstreamURL("openai", BIGMODEL_PROVIDER)).toBe(
-      "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
-    );
-  });
 });
 
 describe("buildZcodeTraceHeaders", () => {
@@ -134,24 +153,20 @@ describe("buildZcodeTraceHeaders", () => {
 });
 describe("buildAuthHeaders", () => {
   it("injects x-api-key + anthropic-version for Anthropic", () => {
-    const h = buildAuthHeaders("anthropic", ZAI_CRED, IDENTITY);
+    const h = buildAuthHeaders(ZAI_CRED, IDENTITY, "coding-plan");
     expect(h["x-api-key"]).toBe("testkey.testsecret");
     expect(h["anthropic-version"]).toBe("2023-06-01");
   });
 
-  it("injects Authorization Bearer for OpenAI", () => {
-    const h = buildAuthHeaders("openai", ZAI_CRED, IDENTITY);
-    expect(h["authorization"]).toBe("Bearer testkey.testsecret");
-  });
 
   it("coding-plan anthropic: dual auth headers (x-api-key AND Authorization, same value — bundle ebo, CL-25)", () => {
-    const h = buildAuthHeaders("anthropic", ZAI_CRED, IDENTITY, "coding-plan");
+    const h = buildAuthHeaders(ZAI_CRED, IDENTITY, "coding-plan");
     expect(h["x-api-key"]).toBe("testkey.testsecret");
     expect(h["authorization"]).toBe("Bearer testkey.testsecret");
   });
 
   it("start-plan anthropic: only Authorization Bearer jwt, no x-api-key", () => {
-    const h = buildAuthHeaders("anthropic", { ...ZAI_CRED, jwt: "jwt-token" }, IDENTITY, "start-plan");
+    const h = buildAuthHeaders({ ...ZAI_CRED, jwt: "jwt-token" }, IDENTITY, "start-plan");
     expect(h["authorization"]).toBe("Bearer jwt-token");
     expect(h["x-api-key"]).toBeUndefined();
     expect(h["anthropic-version"]).toBe("2023-06-01");
@@ -160,18 +175,14 @@ describe("buildAuthHeaders", () => {
   });
 
   it("uses apiKey only (no secret) for Bigmodel Anthropic", () => {
-    const h = buildAuthHeaders("anthropic", BIGMODEL_CRED, IDENTITY);
+    const h = buildAuthHeaders(BIGMODEL_CRED, IDENTITY, "coding-plan");
     expect(h["x-api-key"]).toBe("bmkey");
     expect(h["anthropic-version"]).toBe("2023-06-01");
   });
 
-  it("uses apiKey only for Bigmodel OpenAI", () => {
-    const h = buildAuthHeaders("openai", BIGMODEL_CRED, IDENTITY);
-    expect(h["authorization"]).toBe("Bearer bmkey");
-  });
 
   it("injects ZCode identity headers (User-Agent + companions + SDK suffix)", () => {
-    const h = buildAuthHeaders("anthropic", ZAI_CRED, IDENTITY);
+    const h = buildAuthHeaders(ZAI_CRED, IDENTITY, "coding-plan");
     // CL-26: bundle Cm/k0o merges the anthropic SDK identity into the UA.
     expect(h["User-Agent"]).toBe("ZCode/test-1.0.0 ai-sdk/anthropic/3.0.81");
     expect(h["X-ZCode-App-Version"]).toBe("test-1.0.0");
@@ -181,16 +192,16 @@ describe("buildAuthHeaders", () => {
   });
 
   it("generates unique x-session-id per call (no shared singleton)", () => {
-    const h1 = buildAuthHeaders("openai", ZAI_CRED, IDENTITY);
-    const h2 = buildAuthHeaders("openai", ZAI_CRED, IDENTITY);
+    const h1 = buildAuthHeaders(ZAI_CRED, IDENTITY, "coding-plan");
+    const h2 = buildAuthHeaders(ZAI_CRED, IDENTITY, "coding-plan");
     expect(h1["x-session-id"]).toBeTruthy();
     expect(h2["x-session-id"]).toBeTruthy();
     expect(h1["x-session-id"]).not.toBe(h2["x-session-id"]);
   });
 
   it("generates unique x-request-id and x-zcode-trace-id per call", () => {
-    const h1 = buildAuthHeaders("openai", ZAI_CRED, IDENTITY);
-    const h2 = buildAuthHeaders("openai", ZAI_CRED, IDENTITY);
+    const h1 = buildAuthHeaders(ZAI_CRED, IDENTITY, "coding-plan");
+    const h2 = buildAuthHeaders(ZAI_CRED, IDENTITY, "coding-plan");
     expect(h1["x-request-id"]).not.toBe(h2["x-request-id"]);
     expect(h1["x-zcode-trace-id"]).not.toBe(h2["x-zcode-trace-id"]);
     expect(h1["x-query-id"]).not.toBe(h2["x-query-id"]);
@@ -198,8 +209,8 @@ describe("buildAuthHeaders", () => {
 
   it("uses a stable x-session-id when an enforced client session is provided", () => {
     const session = { action: "enforce" as const, upstreamSessionId: "11111111-1111-4111-8111-111111111111" };
-    const h1 = buildAuthHeaders("openai", ZAI_CRED, IDENTITY, "coding-plan", session);
-    const h2 = buildAuthHeaders("openai", ZAI_CRED, IDENTITY, "coding-plan", session);
+    const h1 = buildAuthHeaders(ZAI_CRED, IDENTITY, "coding-plan", session);
+    const h2 = buildAuthHeaders(ZAI_CRED, IDENTITY, "coding-plan", session);
 
     expect(h1["x-session-id"]).toBe("11111111-1111-4111-8111-111111111111");
     expect(h2["x-session-id"]).toBe("11111111-1111-4111-8111-111111111111");
@@ -218,7 +229,7 @@ describe("buildAuthHeaders", () => {
       queryId: "query_turn_1",
       upstreamSessionId: "sess_thread_1",
     };
-    const h = buildAuthHeaders("anthropic", ZAI_CRED, IDENTITY, "coding-plan", session);
+    const h = buildAuthHeaders(ZAI_CRED, IDENTITY, "coding-plan", session);
 
     // Identity part mirrors the bundle's 3.12.3 LLM builder `g6n` (CL-27):
     // language/timezone always present, X-Release-Channel right after
@@ -254,8 +265,8 @@ describe("buildAuthHeaders", () => {
   });
   it("does not stabilize x-session-id for observe-only client sessions", () => {
     const session = { action: "observe" as const, upstreamSessionId: "11111111-1111-4111-8111-111111111111" };
-    const h1 = buildAuthHeaders("openai", ZAI_CRED, IDENTITY, "coding-plan", session);
-    const h2 = buildAuthHeaders("openai", ZAI_CRED, IDENTITY, "coding-plan", session);
+    const h1 = buildAuthHeaders(ZAI_CRED, IDENTITY, "coding-plan", session);
+    const h2 = buildAuthHeaders(ZAI_CRED, IDENTITY, "coding-plan", session);
 
     expect(h1["x-session-id"]).toBeTruthy();
     expect(h2["x-session-id"]).toBeTruthy();
@@ -263,7 +274,7 @@ describe("buildAuthHeaders", () => {
   });
 
   it("does not synthesize start-plan query/session headers when no trace context exists", () => {
-    const h = buildAuthHeaders("anthropic", { ...ZAI_CRED, jwt: "jwt-token" }, IDENTITY, "start-plan");
+    const h = buildAuthHeaders({ ...ZAI_CRED, jwt: "jwt-token" }, IDENTITY, "start-plan");
 
     expect(h["x-request-id"]).toBeTruthy();
     expect(h["x-zcode-trace-id"]).toBeTruthy();
@@ -277,7 +288,7 @@ describe("buildAuthHeaders", () => {
       action: "observe" as const,
       upstreamSessionId: "11111111-1111-4111-8111-111111111111",
     };
-    const h = buildAuthHeaders("openai", { ...ZAI_CRED, jwt: "jwt-token" }, IDENTITY, "start-plan", session);
+    const h = buildAuthHeaders({ ...ZAI_CRED, jwt: "jwt-token" }, IDENTITY, "start-plan", session);
 
     expect(h["x-request-id"]).toBeTruthy();
     expect(h["x-zcode-trace-id"]).toBeTruthy();
@@ -290,10 +301,11 @@ describe("buildAuthHeaders", () => {
       action: "enforce" as const,
       upstreamSessionId: "11111111-1111-4111-8111-111111111111",
     };
-    const h = buildAuthHeaders("openai", { ...ZAI_CRED, jwt: "jwt-token" }, IDENTITY, "start-plan", session);
+    const h = buildAuthHeaders({ ...ZAI_CRED, jwt: "jwt-token" }, IDENTITY, "start-plan", session);
 
     expect(h["x-session-id"]).toBe("11111111-1111-4111-8111-111111111111");
   });
+
 });
 
 describe("sendOrderedUpstreamRequest", () => {
@@ -342,21 +354,21 @@ describe("sendOrderedUpstreamRequest", () => {
 describe("buildUpstreamHeaderPairs — accept-encoding forwarding", () => {
   it("forwards the client's accept-encoding when present (e.g. identity)", () => {
     const req = makeClientReq("{}", { "accept-encoding": "identity" });
-    const pairs = buildUpstreamHeaderPairs(req, "openai", ZAI_CRED, IDENTITY);
+    const pairs = buildUpstreamHeaderPairs(req, ZAI_CRED, IDENTITY, "coding-plan");
     const ae = pairs.find(([k]) => k === "accept-encoding");
     expect(ae?.[1]).toBe("identity");
   });
 
   it("defaults to gzip when the client sent no accept-encoding", () => {
     const req = makeClientReq("{}");
-    const pairs = buildUpstreamHeaderPairs(req, "openai", ZAI_CRED, IDENTITY);
+    const pairs = buildUpstreamHeaderPairs(req, ZAI_CRED, IDENTITY, "coding-plan");
     const ae = pairs.find(([k]) => k === "accept-encoding");
     expect(ae?.[1]).toBe("gzip");
   });
 
   it("forwards multi-value accept-encoding verbatim", () => {
     const req = makeClientReq("{}", { "accept-encoding": "gzip, deflate, br" });
-    const pairs = buildUpstreamHeaderPairs(req, "openai", ZAI_CRED, IDENTITY);
+    const pairs = buildUpstreamHeaderPairs(req, ZAI_CRED, IDENTITY, "coding-plan");
     const ae = pairs.find(([k]) => k === "accept-encoding");
     expect(ae?.[1]).toBe("gzip, deflate, br");
   });
@@ -365,7 +377,7 @@ describe("buildUpstreamHeaderPairs — accept-encoding forwarding", () => {
 describe("buildUpstreamRequest", () => {
   it("constructs full Anthropic request with correct URL + headers", async () => {
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[]}');
-    const upstream = buildUpstreamRequest(clientReq, "anthropic", ZAI_PROVIDER, ZAI_CRED, '{"model":"glm-4.6","messages":[]}', IDENTITY);
+    const upstream = buildUpstreamRequest(clientReq, ZAI_ANTHROPIC_BASE, ZAI_CRED, '{"model":"glm-4.6","messages":[]}', IDENTITY, "coding-plan");
 
     expect(upstream.url).toBe("https://api.z.ai/api/anthropic/v1/messages");
     expect(upstream.method).toBe("POST");
@@ -379,24 +391,16 @@ describe("buildUpstreamRequest", () => {
     expect(body).toBe('{"model":"glm-4.6","messages":[]}');
   });
 
-  it("constructs full OpenAI request with correct URL + headers", async () => {
-    const clientReq = makeClientReq('{"model":"glm-4.6","messages":[]}');
-    const upstream = buildUpstreamRequest(clientReq, "openai", BIGMODEL_PROVIDER, BIGMODEL_CRED, '{"model":"glm-4.6","messages":[]}', IDENTITY);
 
-    expect(upstream.url).toBe("https://open.bigmodel.cn/api/coding/paas/v4/chat/completions");
-    expect(upstream.headers.get("authorization")).toBe("Bearer bmkey");
-    expect(upstream.headers.get("content-type")).toBe("application/json");
-  });
-
-  it("preserves anthropic-beta header from client", () => {
+  it("no longer copies anthropic-beta verbatim (filtered by policy)", () => {
     const clientReq = makeClientReq("{}", { "anthropic-beta": "prompt-caching-2024-07-31" });
-    const upstream = buildUpstreamRequest(clientReq, "anthropic", ZAI_PROVIDER, ZAI_CRED, "{}", IDENTITY);
-    expect(upstream.headers.get("anthropic-beta")).toBe("prompt-caching-2024-07-31");
+    const upstream = buildUpstreamRequest(clientReq, ZAI_ANTHROPIC_BASE, ZAI_CRED, "{}", IDENTITY, "coding-plan");
+    expect(upstream.headers.get("anthropic-beta")).toBeNull();
   });
 
   it("strips client Authorization header (prevents credential leak)", () => {
     const clientReq = makeClientReq("{}", { authorization: "Bearer client-token" });
-    const upstream = buildUpstreamRequest(clientReq, "anthropic", ZAI_PROVIDER, ZAI_CRED, "{}", IDENTITY);
+    const upstream = buildUpstreamRequest(clientReq, ZAI_ANTHROPIC_BASE, ZAI_CRED, "{}", IDENTITY, "coding-plan");
     // Auth must be the injected credential, NOT the client's. Coding-plan
     // anthropic requests carry BOTH x-api-key and Authorization with the
     // same injected value (bundle ebo, CL-25).
@@ -405,21 +409,124 @@ describe("buildUpstreamRequest", () => {
     expect(upstream.headers.get("authorization")).not.toContain("client-token");
   });
 
-  it("strips client x-api-key header", () => {
-    const clientReq = makeClientReq("{}", { "x-api-key": "client-key" });
-    const upstream = buildUpstreamRequest(clientReq, "openai", ZAI_PROVIDER, ZAI_CRED, "{}", IDENTITY);
-    // For OpenAI format, auth goes in Authorization header; client's x-api-key should be stripped
-    expect(upstream.headers.get("authorization")).toBe("Bearer testkey.testsecret");
-    expect(upstream.headers.get("x-api-key")).toBeNull();
+});
+
+/**
+ * `anthropic-beta` is filtered by `identity.betaPolicy` instead of being
+ * copied through. Request-header audit (`docs/research/request-header-audit.md`
+ * 2.1): the official ZCode CLI sends no beta unless tool search is on, so `drop`
+ * is the default, while Claude Code v2.1.319 puts a dozen on `/v1/messages`, two of
+ * which name the client against a `User-Agent: ZCode/…`.
+ */
+describe("anthropic-beta policy", () => {
+  /** The single beta the official ZCode client ever sends (tool-search path). */
+  const TOOL_SEARCH_BETA = "advanced-tool-use-2025-11-20";
+  /** Betas Claude Code v2.1.319 actually ships on `/v1/messages`. */
+  const CLAUDE_CODE_BETAS = [
+    "claude-code-20250219",
+    "oauth-2025-04-20",
+    "interleaved-thinking-2025-05-14",
+    "context-1m-2025-08-07",
+  ].join(", ");
+
+  function withBetaPolicy(betaPolicy: BetaPolicy, betaAllowlist: string[] = []): ProxyIdentity {
+    return { ...IDENTITY, betaPolicy, betaAllowlist };
+  }
+
+  /** The `anthropic-beta` value that would reach the wire, or `undefined`. */
+  function betaValue(
+    clientHeaders: Record<string, string>,
+    betaPolicy: BetaPolicy,
+    betaAllowlist: string[] = [],
+  ): string | undefined {
+    const pairs = buildUpstreamHeaderPairs(
+      makeClientReq("{}", clientHeaders),
+      ZAI_CRED,
+      withBetaPolicy(betaPolicy, betaAllowlist),
+      "coding-plan",
+    );
+    return pairs.find(([name]) => name === "anthropic-beta")?.[1];
+  }
+
+  it("drop (default): no anthropic-beta reaches the wire at all", () => {
+    expect(betaValue({ "anthropic-beta": CLAUDE_CODE_BETAS }, "drop")).toBeUndefined();
+  });
+
+  it("drop stays authoritative even when an allowlist is configured", () => {
+    // `betaAllowlist` is only consulted under `allowlist`; a leftover
+    // list must not resurrect the header after switching back to `drop`.
+    expect(betaValue({ "anthropic-beta": TOOL_SEARCH_BETA }, "drop", [TOOL_SEARCH_BETA])).toBeUndefined();
+  });
+
+  it("allowlist: keeps the listed value and drops the rest", () => {
+    const value = betaValue(
+      { "anthropic-beta": `${CLAUDE_CODE_BETAS}, ${TOOL_SEARCH_BETA}` },
+      "allowlist",
+      [TOOL_SEARCH_BETA],
+    );
+    expect(value).toBe(TOOL_SEARCH_BETA);
+  });
+
+  it("allowlist: values outside the list are dropped entirely (no empty header)", () => {
+    expect(betaValue({ "anthropic-beta": CLAUDE_CODE_BETAS }, "allowlist", [TOOL_SEARCH_BETA])).toBeUndefined();
+  });
+
+  it("allowlist: multiple hits keep their original order", () => {
+    const second = "mid-conversation-system-2026-04-07";
+    const value = betaValue(
+      { "anthropic-beta": `${TOOL_SEARCH_BETA}, ${second}` },
+      "allowlist",
+      [TOOL_SEARCH_BETA, second],
+    );
+    expect(value).toBe(`${TOOL_SEARCH_BETA},${second}`);
+  });
+
+  it("allowlist: value match is case-insensitive", () => {
+    const value = betaValue({ "anthropic-beta": "Advanced-Tool-Use-2025-11-20" }, "allowlist", [TOOL_SEARCH_BETA]);
+    expect(value?.toLowerCase()).toBe(TOOL_SEARCH_BETA);
+  });
+
+  it("allowlist: surrounding whitespace in the client value is trimmed, not matched", () => {
+    expect(betaValue({ "anthropic-beta": `  ${TOOL_SEARCH_BETA}  ` }, "allowlist", [TOOL_SEARCH_BETA])).toBe(TOOL_SEARCH_BETA);
+  });
+
+  it("header name is case-insensitive: `Anthropic-Beta` is recognized", () => {
+    expect(betaValue({ "Anthropic-Beta": TOOL_SEARCH_BETA }, "drop")).toBeUndefined();
+    expect(betaValue({ "Anthropic-Beta": TOOL_SEARCH_BETA }, "allowlist", [TOOL_SEARCH_BETA])).toBe(TOOL_SEARCH_BETA);
+  });
+
+  it("header name is case-insensitive: `ANTHROPIC-BETA` is recognized", () => {
+    expect(betaValue({ "ANTHROPIC-BETA": TOOL_SEARCH_BETA }, "drop")).toBeUndefined();
+    expect(betaValue({ "ANTHROPIC-BETA": TOOL_SEARCH_BETA }, "allowlist", [TOOL_SEARCH_BETA])).toBe(TOOL_SEARCH_BETA);
+  });
+
+  it("empty / comma-only / space-only values never produce an empty header", () => {
+    // A present-but-blank `anthropic-beta:` is itself a shape the official
+    // client never emits, so the header must be absent, not empty.
+    for (const blank of ["", ",", ",,", " ", "   ", " , ", ", ,"]) {
+      expect(betaValue({ "anthropic-beta": blank }, "drop")).toBeUndefined();
+      expect(betaValue({ "anthropic-beta": blank }, "allowlist", [TOOL_SEARCH_BETA])).toBeUndefined();
+    }
+  });
+
+  it("omits the header when the client sent none", () => {
+    expect(betaValue({}, "allowlist", [TOOL_SEARCH_BETA])).toBeUndefined();
+  });
+
+  it("full upstream request carries no client-identifying beta", () => {
+    const clientReq = makeClientReq("{}", { "anthropic-beta": CLAUDE_CODE_BETAS });
+    const upstream = buildUpstreamRequest(clientReq, ZAI_ANTHROPIC_BASE, ZAI_CRED, "{}", IDENTITY, "coding-plan");
+    const wire = JSON.stringify([...upstream.headers.entries()]);
+    expect(upstream.headers.get("anthropic-beta")).toBeNull();
+    expect(wire).not.toContain("claude-code-20250219");
+    expect(wire).not.toContain("oauth-2025-04-20");
   });
 });
 
 describe("proxyRequest", () => {
   const testConfig: ProxyConfig = {
     server: { port: 8080, host: "0.0.0.0" },
-    auth: {},
-    provider: "zai",
-    plan: "coding-plan",
+    auth: { requireKey: false },
     providers: {
       zai: { anthropicBase: "https://api.z.ai/api/anthropic", openaiBase: "https://api.z.ai/api/coding/paas/v4" },
       bigmodel: { anthropicBase: "https://open.bigmodel.cn/api/anthropic", openaiBase: "https://open.bigmodel.cn/api/coding/paas/v4" },
@@ -428,12 +535,12 @@ describe("proxyRequest", () => {
     models: ["glm-4.6"],
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
-    responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+    responses: { storeMaxEntries: 1000, storeTtlMs: 86400000 },
   endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
   clientSigning: { enabled: false }, highspeed: { enabled: false, origin: "https://zcode.z.ai", models: [] },
-  mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
+  mcp: { enabled: true, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
   async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
-  claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
+  claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, sprintWindowMs: 1800000, sprintPollIntervalMs: 60000 },
   logging: { level: "info" },
   };
 
@@ -470,13 +577,13 @@ describe("proxyRequest", () => {
       expect(req.headers.get("x-api-key")).toBe("testkey.testsecret");
       expect(req.headers.get("anthropic-version")).toBe("2023-06-01");
       const reqBody = JSON.parse(await req.text());
-      // metadata.user_id is the device/session blob (bundle UIo) — the account
-      // uuid is never transmitted; testConfig identity carries no deviceMid →
-      // device_id omitted; observe-mode clientIdentity may synthesize a
-      // session, so only the deterministic parts are asserted.
+      // metadata.user_id is the device/session blob (bundle UIo): the account
+      // uuid is never transmitted, device_id is the leased account's own
+      // fingerprint, and observe-mode clientIdentity may synthesize
+      // a session, so only the deterministic parts are asserted.
       const uid = JSON.parse(reqBody.metadata.user_id);
       expect(uid.account_uuid).toBe("");
-      expect(uid.device_id).toBeUndefined();
+      expect(uid.device_id).toBe("test-device-mid");
       expect(typeof uid.session_id).toBe("string");
       return new Response(JSON.stringify({
         id: "msg_fwd",
@@ -493,10 +600,10 @@ describe("proxyRequest", () => {
       });
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}]}');
 
-    const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, broker, fetchImpl: fetchMock as any });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(resp.status).toBe(200);
@@ -527,10 +634,10 @@ describe("proxyRequest", () => {
       });
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[],"stream":true}');
 
-    const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, broker, fetchImpl: fetchMock as any });
 
     expect(resp.status).toBe(200);
     expect(resp.headers.get("content-type")).toBe("text/event-stream");
@@ -562,10 +669,10 @@ describe("proxyRequest", () => {
       });
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[]}');
 
-    const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, broker, fetchImpl: fetchMock as any });
 
     expect(resp.status).toBe(200);
     expect(resp.headers.get("content-type")).toBe("application/json");
@@ -579,10 +686,10 @@ describe("proxyRequest", () => {
       throw new Error("ECONNREFUSED");
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[]}');
 
-    const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, broker, fetchImpl: fetchMock as any });
 
     expect(resp.status).toBe(502);
     const body = await resp.json();
@@ -593,10 +700,10 @@ describe("proxyRequest", () => {
   it("returns 503 when credential unavailable", async () => {
     const fetchMock = mock(async (): Promise<Response> => new Response("ok"));
 
-    const auth = new AuthManager();
+    const broker = noAccountBroker();
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[]}');
 
-    const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, broker, fetchImpl: fetchMock as any });
 
     expect(resp.status).toBe(503);
     expect(fetchMock).not.toHaveBeenCalled();
@@ -612,10 +719,10 @@ describe("proxyRequest", () => {
       });
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeClientReq('{"model":"bad-model","messages":[]}');
 
-    const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, broker, fetchImpl: fetchMock as any });
 
     expect(resp.status).toBe(400);
     const body = await resp.json();
@@ -626,9 +733,7 @@ describe("proxyRequest", () => {
 describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic upstream)", () => {
   const testConfig: ProxyConfig = {
     server: { port: 8080, host: "0.0.0.0" },
-    auth: {},
-    provider: "zai",
-    plan: "coding-plan",
+    auth: { requireKey: false },
     providers: {
       zai: { anthropicBase: "https://api.z.ai/api/anthropic", openaiBase: "https://api.z.ai/api/coding/paas/v4" },
       bigmodel: { anthropicBase: "https://open.bigmodel.cn/api/anthropic", openaiBase: "https://open.bigmodel.cn/api/coding/paas/v4" },
@@ -637,12 +742,12 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
     models: ["glm-4.6"],
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
-    responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+    responses: { storeMaxEntries: 1000, storeTtlMs: 86400000 },
   endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
   clientSigning: { enabled: false }, highspeed: { enabled: false, origin: "https://zcode.z.ai", models: [] },
-  mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
+  mcp: { enabled: true, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
   async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
-  claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
+  claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, sprintWindowMs: 1800000, sprintPollIntervalMs: 60000 },
   logging: { level: "info" },
   };
 
@@ -671,10 +776,10 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}]}');
 
-    await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    await proxyRequest(clientReq, "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -688,10 +793,10 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}]}');
 
-    await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    await proxyRequest(clientReq, "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
   });
 
   it("sends a translated Anthropic body upstream (no stream_options concept)", async () => {
@@ -707,10 +812,10 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}],"stream":true}');
 
-    await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    await proxyRequest(clientReq, "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
   });
 
   it("translates the Anthropic batch response back to OpenAI shape", async () => {
@@ -718,10 +823,10 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}]}');
 
-    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(resp.status).toBe(200);
     expect(resp.headers.get("content-type")).toBe("application/json");
     const body = await resp.json();
@@ -736,10 +841,10 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}');
 
-    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(resp.headers.get("content-encoding")).toBeNull();
     const body = await resp.json();
     expect(body.object).toBe("chat.completion");
@@ -765,10 +870,10 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       return new Response(sseBody, { status: 200, headers: { "content-type": "text/event-stream" } });
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[],"stream":true}');
 
-    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(resp.status).toBe(200);
     expect(resp.headers.get("content-type")).toBe("text/event-stream");
 
@@ -792,10 +897,10 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       });
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}');
 
-    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(resp.headers.get("x-request-id")).toBe("req_abc123");
     expect(resp.headers.get("anthropic-ratelimit-requests-remaining")).toBe("99");
     expect(resp.headers.get("anthropic-ratelimit-tokens-reset")).toBe("2025-01-01T00:00:00Z");
@@ -809,10 +914,10 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       });
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}', { "accept-encoding": "gzip" });
 
-    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(resp.headers.get("content-encoding")).toBe("gzip");
   });
 
@@ -827,10 +932,10 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       });
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}');
 
-    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(resp.headers.get("content-encoding")).toBeNull();
     const body = await resp.json();
     expect(body.object).toBe("chat.completion");
@@ -838,10 +943,10 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
 
   it("returns 400 for a malformed OpenAI body without calling upstream", async () => {
     const fetchMock = mock(async (): Promise<Response> => new Response("ok"));
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeOpenAIReq("not json");
 
-    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(resp.status).toBe(400);
     expect(fetchMock).toHaveBeenCalledTimes(0);
     const body = await resp.json();
@@ -852,10 +957,10 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
     const fetchMock = mock(async (): Promise<Response> => {
       return new Response("not json", { status: 200, headers: { "content-type": "text/plain" } });
     });
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}');
 
-    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(resp.status).toBe(502);
     const body = await resp.json();
     expect(body.error.type).toBe("translation_failed");
@@ -865,10 +970,10 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
     const fetchMock = mock(async (): Promise<Response> => {
       return new Response('{"type":"error","error":{"type":"invalid_request_error","message":"bad request"}}', { status: 400, headers: { "content-type": "application/json" } });
     });
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}');
 
-    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     // Wrapping upstream 4xx/5xx as 502 made clients retry real rejections
     // (405/3012, 429) as transient faults — the status and body now pass
     // through verbatim so clients see the true error.
@@ -892,9 +997,7 @@ describe("client gzip handling", () => {
 
   const testConfig: ProxyConfig = {
     server: { port: 8080, host: "0.0.0.0" },
-    auth: {},
-    provider: "zai",
-    plan: "coding-plan",
+    auth: { requireKey: false },
     providers: {
       zai: { anthropicBase: "https://api.z.ai/api/anthropic", openaiBase: "https://api.z.ai/api/coding/paas/v4" },
       bigmodel: { anthropicBase: "https://open.bigmodel.cn/api/anthropic", openaiBase: "https://open.bigmodel.cn/api/coding/paas/v4" },
@@ -903,47 +1006,16 @@ describe("client gzip handling", () => {
     models: ["glm-4.6"],
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
-    responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+    responses: { storeMaxEntries: 1000, storeTtlMs: 86400000 },
   endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
   clientSigning: { enabled: false }, highspeed: { enabled: false, origin: "https://zcode.z.ai", models: [] },
-    mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
+    mcp: { enabled: true, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
     async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
-  claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
+  claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, sprintWindowMs: 1800000, sprintPollIntervalMs: 60000 },
     logging: { level: "info" },
   };
 
-  const auth = oauthAuth();
-
-  it("stripAutoDecodedEncoding drops gzip/br labels and stale content-length", () => {
-    const upstream = new Response('{"ok":true}', {
-      status: 200,
-      headers: { "content-type": "application/json", "content-encoding": "gzip", "content-length": "49" },
-    });
-    const normalized = stripAutoDecodedEncoding(upstream);
-    expect(normalized).not.toBe(upstream);
-    expect(normalized.status).toBe(200);
-    expect(normalized.headers.get("content-encoding")).toBeNull();
-    expect(normalized.headers.get("content-length")).toBeNull();
-    expect(normalized.headers.get("content-type")).toBe("application/json");
-  });
-
-  it("stripAutoDecodedEncoding handles br and comma-separated coding lists", () => {
-    const br = new Response("x", { status: 200, headers: { "content-encoding": "br" } });
-    expect(stripAutoDecodedEncoding(br).headers.get("content-encoding")).toBeNull();
-
-    const multi = new Response("x", { status: 201, headers: { "content-encoding": "gzip, br" } });
-    const normalized = stripAutoDecodedEncoding(multi);
-    expect(normalized.headers.get("content-encoding")).toBeNull();
-    expect(normalized.status).toBe(201);
-  });
-
-  it("stripAutoDecodedEncoding leaves unsupported or absent encodings untouched", () => {
-    const zstd = new Response("x", { status: 200, headers: { "content-encoding": "zstd" } });
-    expect(stripAutoDecodedEncoding(zstd)).toBe(zstd);
-
-    const plain = new Response("x", { status: 200 });
-    expect(stripAutoDecodedEncoding(plain)).toBe(plain);
-  });
+  const broker = oauthBroker();
 
   it("inflates gzip request bodies before forwarding upstream", async () => {
     const payload = '{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}]}';
@@ -960,7 +1032,7 @@ describe("client gzip handling", () => {
       body: gzipSync(new TextEncoder().encode(payload)),
     });
 
-    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(resp.status).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const body = await resp.json();
@@ -976,7 +1048,7 @@ describe("client gzip handling", () => {
       body: new Uint8Array([1, 2, 3, 4]),
     });
 
-    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(resp.status).toBe(400);
     expect(fetchMock).toHaveBeenCalledTimes(0);
     const body = await resp.json();
@@ -995,7 +1067,7 @@ describe("client gzip handling", () => {
       body: bomb,
     });
 
-    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(resp.status).toBe(413);
     expect(fetchMock).toHaveBeenCalledTimes(0);
     const body = await resp.json();
@@ -1017,7 +1089,7 @@ describe("client gzip handling", () => {
       body: payload,
     });
 
-    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(resp.status).toBe(200);
   });
 });
@@ -1025,9 +1097,7 @@ describe("client gzip handling", () => {
 describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
   const testConfig: ProxyConfig = {
     server: { port: 8080, host: "0.0.0.0" },
-    auth: {},
-    provider: "zai",
-    plan: "coding-plan",
+    auth: { requireKey: false },
     providers: {
       zai: { anthropicBase: "https://api.z.ai/api/anthropic", openaiBase: "https://api.z.ai/api/coding/paas/v4" },
       bigmodel: { anthropicBase: "https://open.bigmodel.cn/api/anthropic", openaiBase: "https://open.bigmodel.cn/api/coding/paas/v4" },
@@ -1036,12 +1106,12 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
     models: ["glm-4.6"],
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
-    responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+    responses: { storeMaxEntries: 1000, storeTtlMs: 86400000 },
   endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
   clientSigning: { enabled: false }, highspeed: { enabled: false, origin: "https://zcode.z.ai", models: [] },
-  mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
+  mcp: { enabled: true, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
   async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
-  claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
+  claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, sprintWindowMs: 1800000, sprintPollIntervalMs: 60000 },
   logging: { level: "info" },
   };
 
@@ -1065,10 +1135,10 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
       }), { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}');
 
-    const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(resp.status).toBe(200);
     const body = await resp.json();
     expect(body.type).toBe("message");
@@ -1076,10 +1146,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
   });
 
   it("start-plan OpenAI request translates to the live Anthropic gateway (Bearer JWT)", async () => {
-    const startPlanConfig: ProxyConfig = {
-      ...testConfig,
-      plan: "start-plan",
-    };
+    const startPlanConfig: ProxyConfig = testConfig;
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (req: Request | string): Promise<Response> => {
       const url = typeof req === "string" ? req : req.url;
@@ -1123,15 +1190,14 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
         }), { status: 200, headers: { "content-type": "application/json" } });
       });
 
-      const auth = new AuthManager();
-      auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
+      const broker = startPlanBroker();
       const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: '{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}',
       });
 
-      const resp = await proxyRequest(clientReq, "openai", { config: startPlanConfig, auth, fetchImpl: fetchMock as any });
+      const resp = await proxyRequest(clientReq, "openai", { config: startPlanConfig, broker, fetchImpl: fetchMock as any });
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(resp.status).toBe(200);
       expect(resp.headers.get("content-type")).toBe("application/json");
@@ -1144,10 +1210,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
   });
 
   it("start-plan forwards explicit ZCode trace metadata to gateway attribution headers", async () => {
-    const startPlanConfig: ProxyConfig = {
-      ...testConfig,
-      plan: "start-plan",
-    };
+    const startPlanConfig: ProxyConfig = testConfig;
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (req: Request | string): Promise<Response> => {
       const url = typeof req === "string" ? req : req.url;
@@ -1178,8 +1241,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
         }), { status: 200, headers: { "content-type": "application/json" } });
       });
 
-      const auth = new AuthManager();
-      auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
+      const broker = startPlanBroker();
       const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1195,7 +1257,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
         }),
       });
 
-      const resp = await proxyRequest(clientReq, "openai", { config: startPlanConfig, auth, fetchImpl: fetchMock as any });
+      const resp = await proxyRequest(clientReq, "openai", { config: startPlanConfig, broker, fetchImpl: fetchMock as any });
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(resp.status).toBe(200);
     } finally {
@@ -1206,7 +1268,6 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
   it("start-plan enforce reuses inferred session through the unified resolver", async () => {
     const startPlanConfig: ProxyConfig = {
       ...testConfig,
-      plan: "start-plan",
       clientIdentity: { mode: "enforce", ttlSeconds: 900, maxSessions: 1024 },
     };
     const originalFetch = globalThis.fetch;
@@ -1237,20 +1298,19 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
         }), { status: 200, headers: { "content-type": "application/json" } });
       });
 
-      const auth = new AuthManager();
-      auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
+      const broker = startPlanBroker();
       const body = '{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}';
 
       const first = await proxyRequest(new Request("http://localhost:8080/v1/chat/completions", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body,
-      }), "openai", { config: startPlanConfig, auth, fetchImpl: fetchMock as any });
+      }), "openai", { config: startPlanConfig, broker, fetchImpl: fetchMock as any });
       const second = await proxyRequest(new Request("http://localhost:8080/v1/chat/completions", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body,
-      }), "openai", { config: startPlanConfig, auth, fetchImpl: fetchMock as any });
+      }), "openai", { config: startPlanConfig, broker, fetchImpl: fetchMock as any });
 
       expect(first.status).toBe(200);
       expect(second.status).toBe(200);
@@ -1262,10 +1322,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
   });
 
   it("start-plan Anthropic request passes through to the live gateway with start-plan system blocks", async () => {
-    const startPlanConfig: ProxyConfig = {
-      ...testConfig,
-      plan: "start-plan",
-    };
+    const startPlanConfig: ProxyConfig = testConfig;
     const originalFetch = globalThis.fetch;
     globalThis.fetch = Object.assign(async (req: RequestInfo | URL): Promise<Response> => {
       const url = typeof req === "string" ? req : req instanceof URL ? req.toString() : req.url;
@@ -1306,15 +1363,14 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
         }), { status: 200, headers: { "content-type": "application/json" } });
       }, { preconnect: originalFetch.preconnect });
 
-      const auth = new AuthManager();
-      auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
+      const broker = startPlanBroker();
       const clientReq = new Request("http://localhost:8080/v1/messages", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: '{"model":"glm-4.6","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}',
       });
 
-      const resp = await proxyRequest(clientReq, "anthropic", { config: startPlanConfig, auth, fetchImpl: fetchMock });
+      const resp = await proxyRequest(clientReq, "anthropic", { config: startPlanConfig, broker, fetchImpl: fetchMock });
       expect(resp.status).toBe(200);
       const body = await resp.json();
       expect(body.type).toBe("message");
@@ -1325,10 +1381,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
   });
 
   it("does not re-solve captcha for a start-plan 403 without captcha challenge header", async () => {
-    const startPlanConfig: ProxyConfig = {
-      ...testConfig,
-      plan: "start-plan",
-    };
+    const startPlanConfig: ProxyConfig = testConfig;
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (req: Request | string): Promise<Response> => {
       const url = typeof req === "string" ? req : req.url;
@@ -1348,15 +1401,14 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
         });
       });
 
-      const auth = new AuthManager();
-      auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
+      const broker = startPlanBroker();
       const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: '{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}',
       });
 
-      const resp = await proxyRequest(clientReq, "openai", { config: startPlanConfig, auth, fetchImpl: fetchMock as any });
+      const resp = await proxyRequest(clientReq, "openai", { config: startPlanConfig, broker, fetchImpl: fetchMock as any });
       expect(fetchMock).toHaveBeenCalledTimes(1);
       // The REAL upstream status + body pass through (issue #71): no 502
       // wrapping, so a genuine 403 is not mistaken for a transient fault.
@@ -1372,9 +1424,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
 describe("proxyRequest — tool-call roundtrip (OpenAI client → Anthropic upstream)", () => {
   const testConfig: ProxyConfig = {
     server: { port: 8080, host: "0.0.0.0" },
-    auth: {},
-    provider: "zai",
-    plan: "coding-plan",
+    auth: { requireKey: false },
     providers: {
       zai: { anthropicBase: "https://api.z.ai/api/anthropic", openaiBase: "https://api.z.ai/api/coding/paas/v4" },
       bigmodel: { anthropicBase: "https://open.bigmodel.cn/api/anthropic", openaiBase: "https://open.bigmodel.cn/api/coding/paas/v4" },
@@ -1383,12 +1433,12 @@ describe("proxyRequest — tool-call roundtrip (OpenAI client → Anthropic upst
     models: ["glm-4.6"],
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
-    responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+    responses: { storeMaxEntries: 1000, storeTtlMs: 86400000 },
   endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
   clientSigning: { enabled: false }, highspeed: { enabled: false, origin: "https://zcode.z.ai", models: [] },
-  mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
+  mcp: { enabled: true, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
   async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
-  claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
+  claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, sprintWindowMs: 1800000, sprintPollIntervalMs: 60000 },
   logging: { level: "info" },
   };
 
@@ -1439,7 +1489,7 @@ describe("proxyRequest — tool-call roundtrip (OpenAI client → Anthropic upst
       }), { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
 
     const req1Body = JSON.stringify({
       model: "glm-4.6",
@@ -1447,7 +1497,7 @@ describe("proxyRequest — tool-call roundtrip (OpenAI client → Anthropic upst
       tools: [{ type: "function", function: { name: "get_weather", parameters: { type: "object", properties: { city: { type: "string" } } } } }],
       tool_choice: "auto",
     });
-    const resp1 = await proxyRequest(makeOpenAIReq(req1Body), "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp1 = await proxyRequest(makeOpenAIReq(req1Body), "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(resp1.status).toBe(200);
     const resp1Body = await resp1.json();
     expect(resp1Body.choices[0].finish_reason).toBe("tool_calls");
@@ -1466,7 +1516,7 @@ describe("proxyRequest — tool-call roundtrip (OpenAI client → Anthropic upst
       ],
       tools: [{ type: "function", function: { name: "get_weather", parameters: { type: "object", properties: { city: { type: "string" } } } } }],
     });
-    const resp2 = await proxyRequest(makeOpenAIReq(req2Body), "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp2 = await proxyRequest(makeOpenAIReq(req2Body), "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(resp2.status).toBe(200);
     const resp2Body = await resp2.json();
     expect(resp2Body.choices[0].message.content).toBe("It's 62°F in SF.");
@@ -1501,7 +1551,7 @@ describe("proxyRequest — tool-call roundtrip (OpenAI client → Anthropic upst
       }), { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = oauthAuth();
+    const broker = oauthBroker();
 
     const body = JSON.stringify({
       model: "glm-4.6",
@@ -1520,7 +1570,7 @@ describe("proxyRequest — tool-call roundtrip (OpenAI client → Anthropic upst
       ],
     });
 
-    const resp = await proxyRequest(makeOpenAIReq(body), "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(makeOpenAIReq(body), "openai", { config: testConfig, broker, fetchImpl: fetchMock as any });
     expect(resp.status).toBe(200);
 
     const upstreamReq = JSON.parse(upstreamBody!);
@@ -1537,9 +1587,7 @@ describe("proxyRequest — tool-call roundtrip (OpenAI client → Anthropic upst
 describe("proxyRequest — thinking endpoint matrix", () => {
   const testConfig: ProxyConfig = {
     server: { port: 8080, host: "0.0.0.0" },
-    auth: {},
-    provider: "zai",
-    plan: "coding-plan",
+    auth: { requireKey: false },
     providers: {
       zai: { anthropicBase: "https://api.z.ai/api/anthropic", openaiBase: "https://api.z.ai/api/coding/paas/v4" },
       bigmodel: { anthropicBase: "https://open.bigmodel.cn/api/anthropic", openaiBase: "https://open.bigmodel.cn/api/coding/paas/v4" },
@@ -1548,12 +1596,12 @@ describe("proxyRequest — thinking endpoint matrix", () => {
     models: ["glm-4.6"],
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
-    responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+    responses: { storeMaxEntries: 1000, storeTtlMs: 86400000 },
   endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
   clientSigning: { enabled: false }, highspeed: { enabled: false, origin: "https://zcode.z.ai", models: [] },
-  mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
+  mcp: { enabled: true, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
   async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
-  claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
+  claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, sprintWindowMs: 1800000, sprintPollIntervalMs: 60000 },
   logging: { level: "info" },
   };
 
@@ -1582,14 +1630,12 @@ describe("proxyRequest — thinking endpoint matrix", () => {
     });
   }
 
-  function codingPlanAuth(): AuthManager {
-    return oauthAuth();
+  function codingPlanBroker() {
+    return oauthBroker();
   }
 
-  function startPlanAuth(): AuthManager {
-    const auth = new AuthManager();
-    auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
-    return auth;
+  function startPlanBrokerLocal() {
+    return startPlanBroker();
   }
 
   async function withDisabledCaptcha<T>(run: () => Promise<T>): Promise<T> {
@@ -1701,7 +1747,7 @@ describe("proxyRequest — thinking endpoint matrix", () => {
 
     const resp = await proxyRequest(makeOpenAIReq(false), "openai", {
       config: testConfig,
-      auth: codingPlanAuth(),
+      broker: codingPlanBroker(),
       fetchImpl: fetchMock as any,
     });
 
@@ -1724,7 +1770,7 @@ describe("proxyRequest — thinking endpoint matrix", () => {
 
     const resp = await proxyRequest(makeOpenAIReq(true), "openai", {
       config: testConfig,
-      auth: codingPlanAuth(),
+      broker: codingPlanBroker(),
       fetchImpl: fetchMock as any,
     });
 
@@ -1747,7 +1793,7 @@ describe("proxyRequest — thinking endpoint matrix", () => {
 
     const resp = await proxyRequest(makeAnthropicReq(false), "anthropic", {
       config: testConfig,
-      auth: codingPlanAuth(),
+      broker: codingPlanBroker(),
       fetchImpl: fetchMock as any,
     });
 
@@ -1770,7 +1816,7 @@ describe("proxyRequest — thinking endpoint matrix", () => {
 
     const resp = await proxyRequest(makeAnthropicReq(true), "anthropic", {
       config: testConfig,
-      auth: codingPlanAuth(),
+      broker: codingPlanBroker(),
       fetchImpl: fetchMock as any,
     });
 
@@ -1793,8 +1839,8 @@ describe("proxyRequest — thinking endpoint matrix", () => {
       });
 
       const resp = await proxyRequest(makeOpenAIReq(false), "openai", {
-        config: { ...testConfig, plan: "start-plan" },
-        auth: startPlanAuth(),
+        config: testConfig,
+        broker: startPlanBrokerLocal(),
         fetchImpl: fetchMock as any,
       });
 
@@ -1816,8 +1862,8 @@ describe("proxyRequest — thinking endpoint matrix", () => {
       });
 
       const resp = await proxyRequest(makeOpenAIReq(true), "openai", {
-        config: { ...testConfig, plan: "start-plan" },
-        auth: startPlanAuth(),
+        config: testConfig,
+        broker: startPlanBrokerLocal(),
         fetchImpl: fetchMock as any,
       });
 
@@ -1837,8 +1883,8 @@ describe("proxyRequest — thinking endpoint matrix", () => {
       });
 
       const resp = await proxyRequest(makeAnthropicReq(false), "anthropic", {
-        config: { ...testConfig, plan: "start-plan" },
-        auth: startPlanAuth(),
+        config: testConfig,
+        broker: startPlanBrokerLocal(),
         fetchImpl: fetchMock as any,
       });
 
@@ -1860,8 +1906,8 @@ describe("proxyRequest — thinking endpoint matrix", () => {
       });
 
       const resp = await proxyRequest(makeAnthropicReq(true), "anthropic", {
-        config: { ...testConfig, plan: "start-plan" },
-        auth: startPlanAuth(),
+        config: testConfig,
+        broker: startPlanBrokerLocal(),
         fetchImpl: fetchMock as any,
       });
 

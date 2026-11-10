@@ -7,29 +7,38 @@ import { describe, it, expect } from "bun:test";
 import { hkdfSync } from "node:crypto";
 import { proxyRequest } from "./handler.js";
 import type { ProxyConfig, ProxyIdentity } from "../config/types.js";
-import { AuthManager } from "../auth/manager.js";
+import { brokerFor } from "../accounts/testing.js";
 
-/** AuthManager with a preset oauth credential (replaces the removed apikey mode). */
-function oauthAuth(key = "testkey.testsecret"): AuthManager {
+/**
+ * Broker backed by an in-memory coding-plan account (replaces the removed
+ * `AuthManager`: 5.0 resolves credentials through `broker.acquire()`).
+ */
+function oauthBroker(key = "testkey.testsecret") {
   const [apiKey, secret] = key.split(".");
-  const auth = new AuthManager();
-  auth.setOAuthCredential(secret ? { apiKey, secret, provider: "zai" } : { apiKey, provider: "zai" });
-  return auth;
+  return brokerFor({
+    kind: "zhipu-account",
+    provider: "zai",
+    apiKey,
+    ...(secret ? { secret } : {}),
+    identity: { targetType: "PERSONAL" , deviceMid: "test-device-mid" },
+  }).broker;
 }
+
 import { EndpointRoutingService } from "./endpoint-routing.js";
 import { ClientSigningManager } from "./client-signing.js";
 
 const IDENTITY: ProxyIdentity = {
   appVersion: "3.8.1",
+  appVersionSource: "default",
   sourceTitle: "cli",
   refererOrigin: "https://zcode.z.ai",
+  betaPolicy: "drop",
+  betaAllowlist: [],
 };
 
 const TEST_CONFIG: ProxyConfig = {
   server: { port: 8080, host: "0.0.0.0" },
-  auth: {},
-  provider: "zai",
-  plan: "coding-plan",
+  auth: { requireKey: false },
   providers: {
     zai: { anthropicBase: "https://api.z.ai/api/anthropic", openaiBase: "https://api.z.ai/api/coding/paas/v4" },
     bigmodel: { anthropicBase: "https://open.bigmodel.cn/api/anthropic", openaiBase: "https://open.bigmodel.cn/api/coding/paas/v4" },
@@ -38,12 +47,12 @@ const TEST_CONFIG: ProxyConfig = {
   models: ["glm-4.6"],
   identity: IDENTITY,
   clientIdentity: { mode: "off", ttlSeconds: 900, maxSessions: 1024 },
-  responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  responses: { storeMaxEntries: 1000, storeTtlMs: 86400000 },
   endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
   clientSigning: { enabled: false }, highspeed: { enabled: false, origin: "https://zcode.z.ai", models: [] },
-  mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
+  mcp: { enabled: true, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
   async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
-  claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
+  claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, sprintWindowMs: 1800000, sprintPollIntervalMs: 60000 },
   logging: { level: "info" },
 };
 
@@ -129,7 +138,7 @@ describe("proxyRequest endpoint-routing + client-signing wiring", () => {
 
     const resp = await proxyRequest(anthropicClientReq(), "anthropic", {
       config: TEST_CONFIG,
-      auth: oauthAuth(CRED),
+      broker: oauthBroker(CRED),
       fetchImpl: Object.assign(async (input: RequestInfo | URL) => {
         capturedUrl = String(input instanceof Request ? input.url : input);
         capturedHeaders = input instanceof Request ? input.headers : new Headers();
@@ -163,7 +172,7 @@ describe("proxyRequest endpoint-routing + client-signing wiring", () => {
       "X-App-Id": "spoofed",
     }), "anthropic", {
       config: TEST_CONFIG,
-      auth: oauthAuth(CRED),
+      broker: oauthBroker(CRED),
       fetchImpl: Object.assign(async (input: RequestInfo | URL) => {
         capturedUrl = String(input instanceof Request ? input.url : input);
         capturedHeaders = input instanceof Request ? input.headers : new Headers();
@@ -195,7 +204,7 @@ describe("proxyRequest endpoint-routing + client-signing wiring", () => {
         body,
       }), "anthropic", {
         config: cfg,
-        auth: oauthAuth(CRED),
+        broker: oauthBroker(CRED),
         fetchImpl: Object.assign(async (input: RequestInfo | URL) => {
           capturedHeaders = input instanceof Request ? input.headers : new Headers();
           return anthropicOk();

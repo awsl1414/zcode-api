@@ -32,17 +32,20 @@
  * `ZCode/unknown`.
  *
  * Runtime values are read via env overrides (matching the existing
- * ZCODE_IDENTITY_PLATFORM/ARCH/RELEASE pattern) so the Android entry can emit
- * desktop-Linux identity without changing this module:
+ * ZCODE_IDENTITY_PLATFORM/ARCH/RELEASE pattern) so a caller can emit a
+ * different client identity without changing this module:
  *   - ZCODE_IDENTITY_RELEASE_CHANNEL
  *   - ZCODE_IDENTITY_CLIENT_LANGUAGE   (default: Intl locale, e.g. "zh-CN")
  *   - ZCODE_IDENTITY_CLIENT_TIMEZONE   (default: Intl timezone, e.g. "Asia/Shanghai")
- *   - ZCODE_IDENTITY_DEVICE_MID        (no default; omitted unless set)
+ *
+ * `X-Device-Mid` has NO env and NO config surface: the device fingerprint is a
+ * **per-account** property (one virtual device per account), so it is passed in
+ * by the caller that holds the account instead of being resolved from a
+ * process-wide value.
  *
  * @see _reverse/NOTEPAD.md "2. Identity Headers"
  */
 import os from "node:os";
-import { basename } from "node:path";
 import type { ProxyIdentity } from "../config/types.js";
 
 /** Printable-ASCII gate copied from the ZCode bundle's `fio` helper. */
@@ -104,13 +107,12 @@ interface ResolvedIdentityValues {
   releaseChannel: string;
   clientLanguage?: string;
   clientTimezone?: string;
-  deviceMid?: string;
 }
 
 /** Shared env/config resolution for both builders (values only — ordering differs per builder). */
 function resolveIdentityValues(id: ProxyIdentity): ResolvedIdentityValues {
-  // Env overrides (ZCODE_IDENTITY_PLATFORM/ARCH/RELEASE) let the Android entry
-  // emit desktop-Linux identity headers without changing this module.
+  // Env overrides (ZCODE_IDENTITY_PLATFORM/ARCH/RELEASE) let a caller emit a
+  // different identity header set without changing this module.
   return {
     n: resolveAppVersion(id.appVersion),
     platform: normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform),
@@ -123,10 +125,6 @@ function resolveIdentityValues(id: ProxyIdentity): ResolvedIdentityValues {
       ?? (process.env.ZCODE_ENV?.trim().toLowerCase() === "test" ? "test" : "production"),
     clientLanguage: resolveClientLanguage(),
     clientTimezone: resolveClientTimezone(),
-    // env (Android NodeRunner injection) wins over the config.yaml value (desktop
-    // persistence) — both are UUIDv4 generated once and reused forever.
-    deviceMid: normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_DEVICE_MID)
-      ?? normalizePrintableHeaderValue(id.deviceMid),
   };
 }
 
@@ -164,9 +162,8 @@ export function buildLlmIdentityHeaders(id: ProxyIdentity): Record<string, strin
  * endpoint-routing.ts (source headers), claim/client.ts, routes-quota.ts,
  * async bridge.
  *
- * Order — RUNTIME INSERTION order, not source written order (2026-09-19
- * correction, `_reverse/NOTEPAD.md` §E): the official builder spreads a
- * 3-key base first (`yE`/`cU`/`Llr` = `{"User-Agent","HTTP-Referer","X-Title"}`)
+ * Order — RUNTIME INSERTION order, not source written order: the official
+ * builder spreads a 3-key base first (`yE`/`cU`/`Llr` = `{"User-Agent","HTTP-Referer","X-Title"}`)
  * and then overrides/adds keys. JS spread semantics keep overridden keys at
  * their base positions, so the wire order is:
  *   User-Agent, HTTP-Referer, X-Title, [X-ZCode-App-Version], [X-Platform],
@@ -176,9 +173,15 @@ export function buildLlmIdentityHeaders(id: ProxyIdentity): Record<string, strin
  *
  * Returns `Record<string, string>` rather than a fixed interface because
  * several headers are conditionally omitted.
+ *
+ * `deviceMid` is the **account's** fingerprint (one device per account); an
+ * empty string omits the header. There is deliberately no default and no env
+ * fallback: every caller holds an account, so a process-wide value would only
+ * be a way to hand N accounts the same device identity.
  */
-export function buildIdentityHeaders(id: ProxyIdentity): Record<string, string> {
+export function buildIdentityHeaders(id: ProxyIdentity, deviceMid: string): Record<string, string> {
   const v = resolveIdentityValues(id);
+  const deviceMidValue = normalizePrintableHeaderValue(deviceMid);
   return {
     "User-Agent": `ZCode/${v.n ?? "unknown"}`,
     "HTTP-Referer": id.refererOrigin,
@@ -190,7 +193,7 @@ export function buildIdentityHeaders(id: ProxyIdentity): Record<string, string> 
     "X-Client-Timezone": v.clientTimezone ?? "unknown",
     ...(v.platform ? { "X-Os-Category": normalizeOsCategory(v.platformForCategory) } : {}),
     ...(v.release ? { "X-Os-Version": v.release } : {}),
-    ...(v.deviceMid ? { "X-Device-Mid": v.deviceMid } : {}),
+    ...(deviceMidValue ? { "X-Device-Mid": deviceMidValue } : {}),
   };
 }
 
@@ -198,43 +201,11 @@ export function buildIdentityHeaders(id: ProxyIdentity): Record<string, string> 
  * Cache key for process-wide singletons that embed a `ProxyIdentity`
  * (endpoint routing, client signing): two configs producing the same key can
  * share the same service instance.
+ *
+ * The per-account `deviceMid` is NOT part of the key — a device fingerprint is
+ * not a `ProxyIdentity` field. A service that needs a device fingerprint has to
+ * be built per account instead.
  */
 export function identityCacheKey(identity: ProxyIdentity): string {
-  return JSON.stringify([identity.appVersion, identity.sourceTitle, identity.refererOrigin, identity.deviceMid ?? ""]);
-}
-
-/**
- * Environment-info values for the start-plan system prompt's Environment
- * section — mirrors the bundle's `createNodeContextSourceAdapter`
- * (cwd/platform/shell/osVersion feeding `T9o`).
- *
- * platform/arch/release ride the SAME `ZCODE_IDENTITY_*` env chain as the
- * identity headers, so the prompt's `Platform:`/`OS Version:` lines can never
- * contradict `X-Platform`/`X-Os-Version` — real traffic is either all-real
- * (desktop) or all-"unknown" (headless fallback); a mixed combination is a
- * distinguisher no real client produces. `osVersion` keeps the bundle's
- * `${platform} ${release} ${arch}` composition.
- *
- * `shell` follows the bundle algorithm verbatim (`SHELL` ?? `ComSpec` ?? ""
- * → basename, else "unknown" — "unknown" is a legal shell value when
- * detection fails). `cwd` is `ZCODE_IDENTITY_ENV_CWD` if set (Android /
- * masked-identity deployments), else `process.cwd()` — the real client sends
- * its actual working directory, and `cwd` is NEVER "unknown" in real traffic.
- */
-export interface EnvPromptInfo {
-  cwd: string;
-  platform: string;
-  shell: string;
-  osVersion: string;
-}
-
-export function resolveEnvPromptInfo(): EnvPromptInfo {
-  const platform = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform) ?? "unknown";
-  const release = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE ?? os.release()) ?? "";
-  const arch = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_ARCH ?? os.arch()) ?? "";
-  const osVersion = [platform, release, arch].filter((part) => part.length > 0).join(" ");
-  const shellRaw = process.env.SHELL ?? process.env.ComSpec ?? process.env.COMSPEC ?? "";
-  const shell = shellRaw ? basename(shellRaw) : "unknown";
-  const cwd = process.env.ZCODE_IDENTITY_ENV_CWD?.trim() || process.cwd();
-  return { cwd, platform, shell, osVersion };
+  return JSON.stringify([identity.appVersion, identity.sourceTitle, identity.refererOrigin]);
 }

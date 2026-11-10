@@ -10,34 +10,50 @@ import type { ProxyIdentity } from "../config/types.js";
 
 const BASE: ProxyIdentity = {
   appVersion: "1.2.3",
+  appVersionSource: "default",
   sourceTitle: "cli",
   refererOrigin: "https://zcode.z.ai",
+  betaPolicy: "drop",
+  betaAllowlist: [],
 };
+
+/** 一个稳定的 UUIDv4 形态指纹（一账号一指纹，由建号时生成）。*/
+const MID = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+
+/**
+ * 进程级身份头（`X-Device-Mid` 传空 = 这个调用方不带设备指纹）。
+ *
+ * 设备指纹是**账号属性**，所以它不是 `ProxyIdentity` 的字段：需要它的
+ * 调用方把账号的值作为第二个参数传进来。本文件底部有几例专门测这个参数。
+ */
+function headers(id: ProxyIdentity, deviceMid = ""): Record<string, string> {
+  return buildIdentityHeaders(id, deviceMid);
+}
 
 describe("buildIdentityHeaders", () => {
   it("emits User-Agent as ZCode/{appVersion}", () => {
-    const h = buildIdentityHeaders({ ...BASE, appVersion: "9.9.9" });
+    const h = headers({ ...BASE, appVersion: "9.9.9" });
     expect(h["User-Agent"]).toBe("ZCode/9.9.9");
   });
 
   it("emits X-ZCode-App-Version mirroring User-Agent version", () => {
-    const h = buildIdentityHeaders({ ...BASE, appVersion: "4.5.6" });
+    const h = headers({ ...BASE, appVersion: "4.5.6" });
     expect(h["X-ZCode-App-Version"]).toBe("4.5.6");
     expect(h["User-Agent"]).toBe("ZCode/4.5.6");
   });
 
   it("emits X-Title as `Z Code@{sourceTitle}`", () => {
-    const h = buildIdentityHeaders({ ...BASE, sourceTitle: "electron" });
+    const h = headers({ ...BASE, sourceTitle: "electron" });
     expect(h["X-Title"]).toBe("Z Code@electron");
   });
 
   it("no longer emits X-ZCode-Agent (3.12.3 `TV` dropped it from this plane)", () => {
-    const h = buildIdentityHeaders(BASE);
+    const h = headers(BASE);
     expect(h["X-ZCode-Agent"]).toBeUndefined();
   });
 
   it("emits runtime platform headers matching the current ZCode bundle", () => {
-    const h = buildIdentityHeaders(BASE);
+    const h = headers(BASE);
     const expectedCategory = process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux";
     expect(h["X-Platform"]).toBe(`${process.platform}-${os.arch()}`);
     expect(h["X-Os-Category"]).toBe(expectedCategory);
@@ -45,88 +61,60 @@ describe("buildIdentityHeaders", () => {
   });
 
   it("emits X-Client-Language/X-Client-Timezone from Intl by default", () => {
-    const h = buildIdentityHeaders(BASE);
+    const h = headers(BASE);
     const expectedLocale = Intl.DateTimeFormat().resolvedOptions().locale;
     const expectedTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     expect(h["X-Client-Language"]).toBe(expectedLocale);
     expect(h["X-Client-Timezone"]).toBe(expectedTz);
   });
 
-  it("emits X-Device-Mid from config value when no env override is set", () => {
-    const mid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
-    const h = buildIdentityHeaders({ ...BASE, deviceMid: mid });
-    expect(h["X-Device-Mid"]).toBe(mid);
+  it("emits X-Device-Mid from the per-account argument", () => {
+    const h = buildIdentityHeaders(BASE, MID);
+    expect(h["X-Device-Mid"]).toBe(MID);
   });
 
-  it("omits X-Device-Mid when neither env nor config provides one", () => {
-    const saved = process.env.ZCODE_IDENTITY_DEVICE_MID;
-    delete process.env.ZCODE_IDENTITY_DEVICE_MID;
-    try {
-      const h = buildIdentityHeaders(BASE);
-      expect(h["X-Device-Mid"]).toBeUndefined();
-    } finally {
-      if (saved !== undefined) process.env.ZCODE_IDENTITY_DEVICE_MID = saved;
-    }
-  });
-
-  it("ZCODE_IDENTITY_DEVICE_MID env wins over the config value", () => {
-    const saved = process.env.ZCODE_IDENTITY_DEVICE_MID;
-    process.env.ZCODE_IDENTITY_DEVICE_MID = "11111111-2222-4333-8444-555555555555";
-    try {
-      const h = buildIdentityHeaders({ ...BASE, deviceMid: "00000000-0000-4000-8000-000000000000" });
-      expect(h["X-Device-Mid"]).toBe("11111111-2222-4333-8444-555555555555");
-    } finally {
-      if (saved === undefined) delete process.env.ZCODE_IDENTITY_DEVICE_MID;
-      else process.env.ZCODE_IDENTITY_DEVICE_MID = saved;
-    }
+  it("omits X-Device-Mid when the account has no fingerprint (api-key credentials)", () => {
+    const h = buildIdentityHeaders(BASE, "");
+    expect(h["X-Device-Mid"]).toBeUndefined();
   });
 
   it("drops a non-printable deviceMid instead of emitting it", () => {
-    const saved = process.env.ZCODE_IDENTITY_DEVICE_MID;
-    process.env.ZCODE_IDENTITY_DEVICE_MID = "bad\u00ffvalue";
-    try {
-      const h = buildIdentityHeaders(BASE);
-      expect(h["X-Device-Mid"]).toBeUndefined();
-    } finally {
-      if (saved === undefined) delete process.env.ZCODE_IDENTITY_DEVICE_MID;
-      else process.env.ZCODE_IDENTITY_DEVICE_MID = saved;
-    }
+    const h = buildIdentityHeaders(BASE, "bad\u00ffvalue");
+    expect(h["X-Device-Mid"]).toBeUndefined();
   });
 
-  it("honours ZCODE_IDENTITY_* env overrides for the four new headers", () => {
+  it("honours ZCODE_IDENTITY_* env overrides for the language/timezone headers", () => {
     const saved = {
       rc: process.env.ZCODE_IDENTITY_RELEASE_CHANNEL,
       cl: process.env.ZCODE_IDENTITY_CLIENT_LANGUAGE,
       ct: process.env.ZCODE_IDENTITY_CLIENT_TIMEZONE,
-      dm: process.env.ZCODE_IDENTITY_DEVICE_MID,
     };
     process.env.ZCODE_IDENTITY_RELEASE_CHANNEL = "beta";
     process.env.ZCODE_IDENTITY_CLIENT_LANGUAGE = "en-US";
     process.env.ZCODE_IDENTITY_CLIENT_TIMEZONE = "UTC";
-    process.env.ZCODE_IDENTITY_DEVICE_MID = "mid-abc-123";
     try {
-      const h = buildIdentityHeaders(BASE);
+      const h = headers(BASE, MID);
       expect(h["X-Release-Channel"]).toBe("beta");
       expect(h["X-Client-Language"]).toBe("en-US");
       expect(h["X-Client-Timezone"]).toBe("UTC");
-      expect(h["X-Device-Mid"]).toBe("mid-abc-123");
+      // 设备指纹不走 env：它是账号属性，只能由调用方传。
+      expect(h["X-Device-Mid"]).toBe(MID);
     } finally {
       for (const [k, v] of Object.entries(saved)) {
-        if (v === undefined) delete process.env[k === "rc" ? "ZCODE_IDENTITY_RELEASE_CHANNEL" : k === "cl" ? "ZCODE_IDENTITY_CLIENT_LANGUAGE" : k === "ct" ? "ZCODE_IDENTITY_CLIENT_TIMEZONE" : "ZCODE_IDENTITY_DEVICE_MID"];
-        else process.env[k === "rc" ? "ZCODE_IDENTITY_RELEASE_CHANNEL" : k === "cl" ? "ZCODE_IDENTITY_CLIENT_LANGUAGE" : k === "ct" ? "ZCODE_IDENTITY_CLIENT_TIMEZONE" : "ZCODE_IDENTITY_DEVICE_MID"] = v;
+        if (v === undefined) delete process.env[k === "rc" ? "ZCODE_IDENTITY_RELEASE_CHANNEL" : k === "cl" ? "ZCODE_IDENTITY_CLIENT_LANGUAGE" : "ZCODE_IDENTITY_CLIENT_TIMEZONE"];
+        else process.env[k === "rc" ? "ZCODE_IDENTITY_RELEASE_CHANNEL" : k === "cl" ? "ZCODE_IDENTITY_CLIENT_LANGUAGE" : "ZCODE_IDENTITY_CLIENT_TIMEZONE"] = v;
       }
     }
   });
 
   it("defaults X-Release-Channel to production and honors ZCODE_ENV=test (bundle IL())", () => {
-    const h = buildIdentityHeaders(BASE);
+    const h = headers(BASE);
     expect(h["X-Release-Channel"]).toBe("production");
-    expect(h["X-Device-Mid"]).toBeUndefined();
 
     const savedEnv = process.env.ZCODE_ENV;
     process.env.ZCODE_ENV = "test";
     try {
-      expect(buildIdentityHeaders(BASE)["X-Release-Channel"]).toBe("test");
+      expect(headers(BASE)["X-Release-Channel"]).toBe("test");
     } finally {
       if (savedEnv === undefined) delete process.env.ZCODE_ENV;
       else process.env.ZCODE_ENV = savedEnv;
@@ -134,12 +122,12 @@ describe("buildIdentityHeaders", () => {
   });
 
   it("passes refererOrigin through as HTTP-Referer", () => {
-    const h = buildIdentityHeaders({ ...BASE, refererOrigin: "https://example.com" });
+    const h = headers({ ...BASE, refererOrigin: "https://example.com" });
     expect(h["HTTP-Referer"]).toBe("https://example.com");
   });
 
   it("preserves the literal 'unknown' version (still printable ASCII)", () => {
-    const h = buildIdentityHeaders({ ...BASE, appVersion: "unknown" });
+    const h = headers({ ...BASE, appVersion: "unknown" });
     expect(h["User-Agent"]).toBe("ZCode/unknown");
     expect(h["X-ZCode-App-Version"]).toBe("unknown");
   });
@@ -149,14 +137,12 @@ describe("buildIdentityHeaders", () => {
   it("emits headers in the exact `TV` runtime insertion order", () => {
     // Clear env-gated headers so the order assertion is deterministic;
     // X-Client-Language/X-Client-Timezone are always present (unknown fallback).
-    // Order = spread-base {User-Agent, HTTP-Referer, X-Title} + appended keys
-    // (NOTEPAD §E correction — overrides keep their base positions).
+    // Order = spread-base {User-Agent, HTTP-Referer, X-Title} + appended keys;
+    // overrides keep their base positions.
     const savedRC = process.env.ZCODE_IDENTITY_RELEASE_CHANNEL;
-    const savedDM = process.env.ZCODE_IDENTITY_DEVICE_MID;
     delete process.env.ZCODE_IDENTITY_RELEASE_CHANNEL;
-    delete process.env.ZCODE_IDENTITY_DEVICE_MID;
     try {
-      const h = buildIdentityHeaders(BASE);
+      const h = headers(BASE);
       expect(Object.keys(h)).toEqual([
         "User-Agent",
         "HTTP-Referer",
@@ -171,17 +157,21 @@ describe("buildIdentityHeaders", () => {
       ]);
     } finally {
       if (savedRC !== undefined) process.env.ZCODE_IDENTITY_RELEASE_CHANNEL = savedRC;
-      if (savedDM !== undefined) process.env.ZCODE_IDENTITY_DEVICE_MID = savedDM;
     }
+  });
+
+  it("appends X-Device-Mid last, after the OS headers", () => {
+    const h = headers(BASE, MID);
+    expect(Object.keys(h).at(-1)).toBe("X-Device-Mid");
   });
 
   it("drops X-ZCode-App-Version and falls User-Agent back to ZCode/unknown when no version resolves", () => {
     // Mirrors `pio` when `fio` returns undefined: User-Agent → "ZCode/unknown", no X-ZCode-App-Version.
-    const empty = buildIdentityHeaders({ ...BASE, appVersion: "" });
+    const empty = headers({ ...BASE, appVersion: "" });
     expect(empty["User-Agent"]).toBe("ZCode/unknown");
     expect(empty["X-ZCode-App-Version"]).toBeUndefined();
 
-    const missing = buildIdentityHeaders({ ...BASE, appVersion: undefined as unknown as string });
+    const missing = headers({ ...BASE, appVersion: undefined as unknown as string });
     expect(missing["User-Agent"]).toBe("ZCode/unknown");
     expect(missing["X-ZCode-App-Version"]).toBeUndefined();
   });
@@ -189,10 +179,8 @@ describe("buildIdentityHeaders", () => {
 
 describe("buildLlmIdentityHeaders (3.12.3 `g6n` shape — CL-27)", () => {
   it("emits headers in the g6n order: X-ZCode-Agent 8th, no X-Device-Mid", () => {
-    const savedDM = process.env.ZCODE_IDENTITY_DEVICE_MID;
-    delete process.env.ZCODE_IDENTITY_DEVICE_MID;
-    try {
-      const h = buildLlmIdentityHeaders({ ...BASE, deviceMid: "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0" });
+    {
+      const h = buildLlmIdentityHeaders(BASE);
       expect(Object.keys(h)).toEqual([
         "HTTP-Referer",
         "User-Agent",
@@ -206,11 +194,8 @@ describe("buildLlmIdentityHeaders (3.12.3 `g6n` shape — CL-27)", () => {
         "X-Os-Category",
         "X-Os-Version",
       ]);
-      // The g6n path NEVER carries X-Device-Mid — even when one exists for
-      // the context (TV) header set.
+      // g6n 这条路永远不带 X-Device-Mid（`TV` 才有这个位置，且它来自账号）。
       expect(h["X-Device-Mid"]).toBeUndefined();
-    } finally {
-      if (savedDM !== undefined) process.env.ZCODE_IDENTITY_DEVICE_MID = savedDM;
     }
   });
 

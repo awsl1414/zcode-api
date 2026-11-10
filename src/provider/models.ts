@@ -6,8 +6,7 @@
  * removing that runtime dependency. Update this list when new GLM models are
  * released or specs change.
  *
- */
-import type { ModelDef } from "./types.js";
+ */import type { ModelDef } from "./types.js";
 
 /** All models available on the GLM coding plan, pinned with verified specs. */
 export const MODELS: ModelDef[] = [
@@ -31,13 +30,3 @@ export const MODELS: ModelDef[] = [
   { id: "glm-4.6v", name: "GLM 4.6V", contextWindow: 131_072, maxOutputTokens: 32_768, vision: true },
   { id: "glm-4.5-air", name: "GLM 4.5 Air", contextWindow: 131_072, maxOutputTokens: 98_304, reasoning: true },
 ];
-
-/**
- * Models advertised via `/v1/models` and the webui picker — a deliberate
- * subset of MODELS. Do not trim MODELS itself to match: the translator still
- * needs the full catalog for maxOutputTokens clamps and reasoning detection
- * on unadvertised (but forwardable) models.
- */
-export const ADVERTISED_MODEL_IDS: readonly string[] = ["glm-5.3", "glm-5.3-flash"];
-
-export const ADVERTISED_MODELS: ModelDef[] = MODELS.filter((m) => ADVERTISED_MODEL_IDS.includes(m.id));

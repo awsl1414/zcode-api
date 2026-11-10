@@ -188,25 +188,6 @@ describe("transformRequestBody — combined behavior", () => {
   });
 });
 
-/** Deterministic env for start-plan assertions (resolveEnvPromptInfo reads these). */
-function withEnvPromptVars<T>(fn: () => T): T {
-  const keys = ["ZCODE_IDENTITY_ENV_CWD", "ZCODE_IDENTITY_PLATFORM", "ZCODE_IDENTITY_RELEASE", "ZCODE_IDENTITY_ARCH", "SHELL"] as const;
-  const saved = keys.map((k) => [k, process.env[k]] as const);
-  process.env.ZCODE_IDENTITY_ENV_CWD = "/home/dev/project";
-  process.env.ZCODE_IDENTITY_PLATFORM = "linux";
-  process.env.ZCODE_IDENTITY_RELEASE = "6.8.0-49-generic";
-  process.env.ZCODE_IDENTITY_ARCH = "x64";
-  process.env.SHELL = "/bin/bash";
-  try {
-    return fn();
-  } finally {
-    for (const [k, v] of saved) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
-  }
-}
-
 describe("transformRequestBody — start-plan system (Anthropic)", () => {
   it("prepends three official blocks in the ContextBuilder shape (3.17.1: no Environment in system)", () => {
     const body = JSON.stringify({
@@ -215,7 +196,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
+    const out = transformRequestBody(body, { format: "anthropic", injectZcodeSystem: true, provider: "bigmodel" });
     const parsed = JSON.parse(out as string);
 
     expect(parsed.system).toHaveLength(3);
@@ -226,7 +207,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     });
     expect(parsed.system[1].text).toContain("# Harness");
     expect(parsed.system[1].text).toContain("working with the user toward their goals");
-    // Desktop Context deliberately not injected (CLI-face state, NOTEPAD §J)
+    // Desktop Context deliberately not injected (CLI-face state)
     expect(parsed.system[1].text).not.toContain("# ZCode Desktop Context");
     expect(parsed.system[1].cache_control).toEqual({ type: "ephemeral" });
     // 3.17.1 moved Environment Info / powered-by / currentDate out of the
@@ -245,7 +226,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
+    const out = transformRequestBody(body, { format: "anthropic", injectZcodeSystem: true, provider: "bigmodel" });
     const parsed = JSON.parse(out as string);
 
     expect(parsed.messages).toHaveLength(2);
@@ -275,7 +256,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
       ],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
+    const out = transformRequestBody(body, { format: "anthropic", injectZcodeSystem: true, provider: "bigmodel" });
     const parsed = JSON.parse(out as string);
     expect(parsed.tools[0]).toEqual({ name: "get_weather" });
     expect(parsed.tools[1]).toEqual({ name: "read_file" });
@@ -288,13 +269,13 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
+    const out = transformRequestBody(body, { format: "anthropic", injectZcodeSystem: true, provider: "bigmodel" });
     const parsed = JSON.parse(out as string);
     // Wiring-level assertions only: the byte-exact block shapes (cli_prefix,
     // stable-block tail, ephemeral breakpoints) are pinned at the
     // buildStartPlanSystem seam (system-prompt.test.ts). Here we verify the
-    // transformer routes the client text through that seam — §J rules
-    // (2026-10-27); negative suppression per the AGENTS.md convention.
+    // transformer routes the client text through that seam (live gateway rules,
+    // 2026-10-27); negative suppression per the AGENTS.md convention.
     expect(parsed.system).toHaveLength(3);
     expect(parsed.system[1].text).toContain("working with the user toward their goals");
     expect(parsed.system[1].text).not.toContain("User rule");
@@ -309,7 +290,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
         messages: [{ role: "user", content: "hi" }],
       });
 
-      const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
+      const out = transformRequestBody(body, { format: "anthropic", injectZcodeSystem: true, provider: "bigmodel" });
       const parsed = JSON.parse(out as string);
 
       expect(parsed.system).toHaveLength(3);
@@ -326,7 +307,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
+    const out = transformRequestBody(body, { format: "anthropic", injectZcodeSystem: true, provider: "bigmodel" });
     const parsed = JSON.parse(out as string);
 
     expect(parsed.system).toHaveLength(3);
@@ -342,7 +323,7 @@ describe("transformRequestBody — start-plan system (OpenAI)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "openai", startPlan: true, provider: "bigmodel" }));
+    const out = transformRequestBody(body, { format: "openai", injectZcodeSystem: true, provider: "bigmodel" });
     const parsed = JSON.parse(out as string);
 
     expect(parsed.messages[0]).toEqual({
@@ -351,7 +332,7 @@ describe("transformRequestBody — start-plan system (OpenAI)", () => {
     });
     expect(parsed.messages[1].role).toBe("system");
     expect(parsed.messages[1].content).toContain("# Harness");
-    // Desktop Context deliberately not injected (CLI-face state, NOTEPAD §J)
+    // Desktop Context deliberately not injected (CLI-face state)
     expect(parsed.messages[1].content).not.toContain("# ZCode Desktop Context");
     expect(parsed.messages[2].role).toBe("system");
     // 3.17.1: Environment Info / powered-by live in meta_user attachments,
@@ -366,7 +347,7 @@ describe("transformRequestBody — start-plan system (OpenAI)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "openai", startPlan: true, provider: "bigmodel" }));
+    const out = transformRequestBody(body, { format: "openai", injectZcodeSystem: true, provider: "bigmodel" });
     const parsed = JSON.parse(out as string);
 
     expect(parsed.messages[0].role).toBe("system");
@@ -433,5 +414,252 @@ describe("transformRequestBody — metadata.user_id (Anthropic)", () => {
     const out = transformRequestBody(body, { format: "openai", metadataUserId: "u_42" });
     const parsed = JSON.parse(out as string);
     expect(parsed.metadata).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 多客户端身份归一 —— 第三层「路由覆盖」（证据
+// `docs/research/client-fingerprints.md` 的 3.2 节「路由级缺口」）：
+// OpenAI 路由的 `applyStartPlanOpenAISystem` 过去只插官方 system 段，完全不碰
+// 客户端自己的 system 消息，身份句 100% 原样出站。现在两条路由共用
+// `normalizeClientSystem`（system-prompt.ts）。
+// ---------------------------------------------------------------------------
+
+/** Cline 的身份句（`Open Source prompts/Cline/Prompt.txt:1`）。 */
+const CLINE_OPENING =
+  "You are Cline, a highly skilled software engineer with extensive knowledge in many programming languages, frameworks, design patterns, and best practices.";
+/** B1 模型归属句（`Anthropic/Claude Code 2.0.txt:173`）。 */
+const CLAUDE_CODE_MODEL_SENTENCE =
+  "You are powered by the model named Sonnet 4.5. The exact model ID is claude-sonnet-4-5-20250929.";
+/** 归一后的 ZCode 身份句（官方 cli_prefix + 句点）。 */
+const ZCODE_IDENTITY_SENTENCE = "You are ZCode, an interactive agent.";
+
+/** Run `fn` with `ZCODE_NORMALIZE_CLIENT_SYSTEM` pinned to `value` (undefined = unset). */
+function withNormalizeSwitch<T>(value: string | undefined, fn: () => T): T {
+  const original = process.env.ZCODE_NORMALIZE_CLIENT_SYSTEM;
+  if (value === undefined) delete process.env.ZCODE_NORMALIZE_CLIENT_SYSTEM;
+  else process.env.ZCODE_NORMALIZE_CLIENT_SYSTEM = value;
+  try {
+    return fn();
+  } finally {
+    if (original === undefined) delete process.env.ZCODE_NORMALIZE_CLIENT_SYSTEM;
+    else process.env.ZCODE_NORMALIZE_CLIENT_SYSTEM = original;
+  }
+}
+
+describe("transformRequestBody — start-plan identity normalization on the OpenAI route", () => {
+  it("normalizes a client `system` message (it used to pass through verbatim)", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      messages: [
+        { role: "system", content: CLINE_OPENING },
+        { role: "user", content: "hi" },
+      ],
+    });
+
+    const out = withNormalizeSwitch(undefined, () =>
+      transformRequestBody(body, { format: "openai", injectZcodeSystem: true, provider: "bigmodel" }),
+    );
+    const parsed = JSON.parse(out as string);
+
+    // 3 official system messages first, then the client's own messages.
+    expect(parsed.messages).toHaveLength(5);
+    expect(parsed.messages[3].role).toBe("system");
+    expect(parsed.messages[3].content).toContain("You are ZCode");
+    expect(parsed.messages[3].content).not.toContain("Cline");
+    expect(parsed.messages[4]).toEqual({ role: "user", content: "hi" });
+  });
+
+  it("normalizes the B1 model-attribution sentence inside a client system message", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      messages: [
+        { role: "system", content: CLAUDE_CODE_MODEL_SENTENCE },
+        { role: "user", content: "hi" },
+      ],
+    });
+
+    const out = withNormalizeSwitch(undefined, () =>
+      transformRequestBody(body, { format: "openai", injectZcodeSystem: true, provider: "bigmodel" }),
+    );
+    const parsed = JSON.parse(out as string);
+
+    expect(parsed.messages[3].content).toBe(ZCODE_IDENTITY_SENTENCE);
+    expect(parsed.messages[3].content).not.toContain("powered by the model named");
+    expect(parsed.messages[3].content).not.toContain("claude-sonnet-4-5");
+  });
+
+  it("normalizes `developer` messages too (the translator folds them into the upstream system field)", () => {
+    // openai-to-anthropic.ts:34 把 role system|developer 一起折进上游 `system`。
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      messages: [
+        { role: "developer", content: CLINE_OPENING },
+        { role: "user", content: "hi" },
+      ],
+    });
+
+    const out = withNormalizeSwitch(undefined, () =>
+      transformRequestBody(body, { format: "openai", injectZcodeSystem: true, provider: "bigmodel" }),
+    );
+    const parsed = JSON.parse(out as string);
+
+    expect(parsed.messages[3].role).toBe("developer");
+    expect(parsed.messages[3].content).toContain("You are ZCode");
+    expect(parsed.messages[3].content).not.toContain("Cline");
+  });
+
+  it("normalizes text parts of array-form system content", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      messages: [
+        { role: "system", content: [{ type: "text", text: CLINE_OPENING }] },
+        { role: "user", content: "hi" },
+      ],
+    });
+
+    const out = withNormalizeSwitch(undefined, () =>
+      transformRequestBody(body, { format: "openai", injectZcodeSystem: true, provider: "bigmodel" }),
+    );
+    const parsed = JSON.parse(out as string);
+
+    expect(parsed.messages[3].content[0].text).toContain("You are ZCode");
+    expect(parsed.messages[3].content[0].text).not.toContain("Cline");
+  });
+
+  it("leaves non-system messages untouched (user prose is never rewritten)", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      messages: [
+        { role: "system", content: "Rule 1" },
+        { role: "user", content: CLINE_OPENING },
+      ],
+    });
+
+    const out = withNormalizeSwitch(undefined, () =>
+      transformRequestBody(body, { format: "openai", injectZcodeSystem: true, provider: "bigmodel" }),
+    );
+    const parsed = JSON.parse(out as string);
+
+    expect(parsed.messages[3]).toEqual({ role: "system", content: "Rule 1" });
+    expect(parsed.messages[4]).toEqual({ role: "user", content: CLINE_OPENING });
+  });
+
+  it("both routes share one normalizer: identical input yields identical text", () => {
+    const anthropicBody = JSON.stringify({
+      model: "glm-5.2",
+      system: CLAUDE_CODE_MODEL_SENTENCE,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const openaiBody = JSON.stringify({
+      model: "glm-5.2",
+      messages: [
+        { role: "system", content: CLAUDE_CODE_MODEL_SENTENCE },
+        { role: "user", content: "hi" },
+      ],
+    });
+
+    const anthropic = withNormalizeSwitch(undefined, () =>
+      transformRequestBody(anthropicBody, { format: "anthropic", injectZcodeSystem: true, provider: "bigmodel" }),
+    );
+    const openai = withNormalizeSwitch(undefined, () =>
+      transformRequestBody(openaiBody, { format: "openai", injectZcodeSystem: true, provider: "bigmodel" }),
+    );
+
+    const anthropicParsed = JSON.parse(anthropic as string);
+    const openaiParsed = JSON.parse(openai as string);
+    // Anthropic block 3 is the `\n\n`-prefixed client text; OpenAI keeps the raw message.
+    expect(anthropicParsed.system[2].text).toBe(`\n\n${openaiParsed.messages[3].content}`);
+    expect(anthropicParsed.system[2].text).toBe(`\n\n${ZCODE_IDENTITY_SENTENCE}`);
+  });
+
+  it("switch off → the client system message is byte-identical (逐字节不变)", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      messages: [
+        { role: "system", content: CLAUDE_CODE_MODEL_SENTENCE },
+        { role: "user", content: "hi" },
+      ],
+    });
+
+    const out = withNormalizeSwitch("0", () =>
+      transformRequestBody(body, { format: "openai", injectZcodeSystem: true, provider: "bigmodel" }),
+    );
+    const parsed = JSON.parse(out as string);
+
+    expect(parsed.messages[3].content).toBe(CLAUDE_CODE_MODEL_SENTENCE);
+  });
+
+  it("is idempotent: transforming the output again changes nothing", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      messages: [
+        { role: "system", content: `${CLINE_OPENING}\n${CLAUDE_CODE_MODEL_SENTENCE}` },
+        { role: "user", content: "hi" },
+      ],
+    });
+
+    const once = withNormalizeSwitch(undefined, () =>
+      transformRequestBody(body, { format: "openai", injectZcodeSystem: true, provider: "bigmodel" }),
+    );
+    const twice = withNormalizeSwitch(undefined, () =>
+      transformRequestBody(once, { format: "openai", injectZcodeSystem: true, provider: "bigmodel" }),
+    );
+
+    const onceParsed = JSON.parse(once as string);
+    const twiceParsed = JSON.parse(twice as string);
+    // Second pass re-prepends the 3 official blocks, so compare the client message.
+    expect(twiceParsed.messages[6]).toEqual(onceParsed.messages[3]);
+    expect(onceParsed.messages[3].content).not.toContain("Cline");
+    expect(onceParsed.messages[3].content).not.toContain("powered by the model named");
+  });
+});
+
+describe("transformRequestBody — effort override (Anthropic branch)", () => {
+  it("rewrites the body to the tier and re-serializes", () => {
+    const body = JSON.stringify({ model: "glm-5.3", max_tokens: 4096, temperature: 0.7 });
+    const out = transformRequestBody(body, { format: "anthropic", effortOverride: "low" });
+    expect(out).not.toBe(body);
+    const parsed = JSON.parse(out as string);
+    expect(parsed.thinking).toEqual({ type: "enabled", budget_tokens: 8000 });
+    expect(parsed.output_config).toEqual({ effort: "low" });
+    expect(parsed.max_tokens).toBe(4096 + 8000);
+    expect(parsed.temperature).toBeUndefined();
+  });
+
+  it("omits the override entirely in passthrough (no ctx.effortOverride)", () => {
+    const body = JSON.stringify({ model: "glm-5.3", max_tokens: 4096, temperature: 0.7 });
+    expect(transformRequestBody(body, { format: "anthropic" })).toBe(body);
+  });
+
+  it("leaves OpenAI-format bodies untouched even when a tier is set", () => {
+    // The OpenAI/Responses chains converge to Anthropic BEFORE this transform
+    // runs; a body still in OpenAI shape here is not ours to rewrite.
+    const body = JSON.stringify({ model: "glm-5.3", max_tokens: 4096, reasoning_effort: "low" });
+    expect(transformRequestBody(body, { format: "openai", effortOverride: "low" })).toBe(body);
+  });
+
+  it("off tier writes thinking disabled and drops output_config", () => {
+    const body = JSON.stringify({
+      model: "glm-5.3-flash",
+      max_tokens: 4096 + 8000,
+      thinking: { type: "enabled", budget_tokens: 8000 },
+      output_config: { effort: "low" },
+    });
+    const out = transformRequestBody(body, { format: "anthropic", effortOverride: "off" });
+    const parsed = JSON.parse(out as string);
+    expect(parsed.thinking).toEqual({ type: "disabled" });
+    expect(parsed.output_config).toBeUndefined();
+    expect(parsed.max_tokens).toBe(4096);
+  });
+
+  it("returns the original string on parse failure even with a tier set", () => {
+    const broken = "{not valid json";
+    expect(transformRequestBody(broken, { format: "anthropic", effortOverride: "low" })).toBe(broken);
+  });
+
+  it("non-reasoning models pass through unchanged (changed:false → original string)", () => {
+    const body = JSON.stringify({ model: "glm-4.6v", max_tokens: 4096 });
+    expect(transformRequestBody(body, { format: "anthropic", effortOverride: "max" })).toBe(body);
   });
 });

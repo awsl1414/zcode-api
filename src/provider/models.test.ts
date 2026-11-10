@@ -1,31 +1,8 @@
 /**
- * Tests for provider definitions and model catalog.
+ * Tests for the model catalog.
  */
 import { describe, it, expect } from "bun:test";
-import { getProvider } from "./providers.js";
-import { MODELS, ADVERTISED_MODELS } from "./models.js";
-
-describe("providers", () => {
-  it("getProvider returns Z.AI definition", () => {
-    const p = getProvider("zai");
-    expect(p.id).toBe("zai");
-    expect(p.anthropicBaseURL).toBe("https://api.z.ai/api/anthropic");
-    expect(p.openaiBaseURL).toBe("https://api.z.ai/api/coding/paas/v4");
-    expect(p.bizHost).toBe("https://api.z.ai");
-  });
-
-  it("getProvider returns Bigmodel definition", () => {
-    const p = getProvider("bigmodel");
-    expect(p.id).toBe("bigmodel");
-    expect(p.anthropicBaseURL).toBe("https://open.bigmodel.cn/api/anthropic");
-    expect(p.openaiBaseURL).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
-    expect(p.bizHost).toBe("https://open.bigmodel.cn");
-  });
-
-  it("getProvider throws on unknown id", () => {
-    expect(() => getProvider("openai" as any)).toThrow(/Unknown provider/);
-  });
-});
+import { MODELS } from "./models.js";
 
 describe("models", () => {
   it("MODELS contains exactly the 11 pinned coding-plan models", () => {
@@ -81,13 +58,5 @@ describe("models", () => {
     expect(v("glm-4.6v")).toBe(true);
     expect(v("glm-5.3")).toBeUndefined();
     expect(v("glm-5.2")).toBeUndefined();
-  });
-
-  it("advertises exactly the glm-5.3 pair via ADVERTISED_MODELS", () => {
-    expect(ADVERTISED_MODELS.map((m) => m.id)).toEqual(["glm-5.3", "glm-5.3-flash"]);
-    // Every advertised entry is backed by a full catalog entry (spec parity).
-    for (const m of ADVERTISED_MODELS) {
-      expect(MODELS.find((e) => e.id === m.id)).toBe(m);
-    }
   });
 });

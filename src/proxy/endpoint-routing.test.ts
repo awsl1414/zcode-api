@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { EndpointRoutingService, requiresClaimCaptcha } from "./endpoint-routing.js";
+import { EndpointRoutingService, getDefaultEndpointRouting, requiresClaimCaptcha } from "./endpoint-routing.js";
 import type { ProxyIdentity } from "../config/types.js";
 
-const identity: ProxyIdentity = { appVersion: "3.8.1", sourceTitle: "cli", refererOrigin: "https://zcode.z.ai" };
+const identity: ProxyIdentity = { appVersion: "3.8.1", appVersionSource: "default", sourceTitle: "cli", refererOrigin: "https://zcode.z.ai", betaPolicy: "drop", betaAllowlist: [] };
 
 const ZAI_ANTHROPIC = "https://api.z.ai/api/anthropic/v1/messages";
 const ZAI_ULTRA = "https://zcode.z.ai/api/v1/ultra-zai/anthropic/v1/messages";
@@ -369,5 +369,72 @@ describe("3.16.3 configs.captcha request-verification switch", () => {
     expect(requiresClaimCaptcha({ enabled: false })).toBeFalse();
     expect(requiresClaimCaptcha({ skipModelRequest: true })).toBeFalse();
     expect(requiresClaimCaptcha({ enabled: false, skipModelRequest: true })).toBeFalse();
+  });
+});
+
+/**
+ * 每账号出口代理（出线点与缓存 key）。
+ *
+ * 注入的 `fetchImpl` 在 `egress.ts::fetchVia` 里原样调用、不套 dispatcher，所以代理
+ * 维度用一个**非法代理 URL**做探针：`egressForOptions` 在发请求之前就抛，只有配置
+ * 拉取确实带上了 `egress`，才会出现「一次 fetch 都没发、路由 fail-open」的结果。
+ */
+describe("EndpointRoutingService × 账号代理", () => {
+  function okMappingFetch(calls: { count: number }): typeof fetch {
+    return (async () => {
+      calls.count++;
+      return new Response(JSON.stringify({
+        code: 0,
+        data: { proxyEndpoint: { mapping: [{ from: ZAI_ANTHROPIC, to: ZAI_ULTRA }] } },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+  }
+
+  it("拉 mapping 走调用方给的代理：非法代理 URL 让配置拉取在出线层失败、路由 fail-open", async () => {
+    const calls = { count: 0 };
+    const svc = new EndpointRoutingService({ identity, fetchImpl: okMappingFetch(calls) });
+
+    const proxied = await svc.resolve(ZAI_ANTHROPIC, undefined, undefined, { proxyUrl: "not-a-proxy-url" });
+    expect(proxied.routed).toBeFalse();
+    expect(proxied.url).toBe(ZAI_ANTHROPIC);
+    expect(calls.count).toBe(0); // 出线层在发请求之前拒了代理 URL
+
+    // 对照：同一个 fixture 不给代理就正常改写
+    const direct = new EndpointRoutingService({ identity, fetchImpl: okMappingFetch(calls) });
+    expect((await direct.resolve(ZAI_ANTHROPIC)).routed).toBeTrue();
+    expect(calls.count).toBe(1);
+  });
+
+  it("实例上的代理用于拉配置（不传 egress 参数的调用方，如 claim）", async () => {
+    const svc = new EndpointRoutingService({
+      identity,
+      egress: { proxyUrl: "not-a-proxy-url" },
+      fetchImpl: okMappingFetch({ count: 0 }),
+    });
+    expect((await svc.resolve(ZAI_ANTHROPIC)).routed).toBeFalse();
+    expect(await svc.getRequestVerificationConfig()).toBeNull();
+  });
+
+  it("getDefaultEndpointRouting 按代理一实例，两个代理不会互相冲掉 snapshot", () => {
+    const config = {
+      endpointRouting: { enabled: true, origin: "https://routing-per-proxy.example" },
+      identity,
+    };
+    const direct = getDefaultEndpointRouting(config);
+    const a = getDefaultEndpointRouting(config, { proxyUrl: "http://127.0.0.1:7890" });
+    const b = getDefaultEndpointRouting(config, { proxyUrl: "http://127.0.0.1:7891" });
+
+    expect(direct).not.toBeNull();
+    expect(a).toBe(getDefaultEndpointRouting(config, { proxyUrl: "http://127.0.0.1:7890" }));
+    expect(a).not.toBe(direct);
+    expect(b).not.toBe(a);
+    expect(b).not.toBe(direct);
+  });
+
+  it("代理维度也参与配置 key：同一代理但不同 origin 是不同实例", () => {
+    const egress = { proxyUrl: "http://127.0.0.1:7892" };
+    const first = getDefaultEndpointRouting({ endpointRouting: { enabled: true, origin: "https://routing-a.example" }, identity }, egress);
+    const second = getDefaultEndpointRouting({ endpointRouting: { enabled: true, origin: "https://routing-b.example" }, identity }, egress);
+    expect(first).not.toBe(second);
   });
 });

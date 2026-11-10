@@ -41,3 +41,44 @@ describe("stream generation throughput", () => {
     expect(m.tokens).toBe(100);
   });
 });
+
+describe("cache token buckets", () => {
+  it("reads Anthropic cache buckets from message_start (直传 / 旁路流的形状)", () => {
+    const m = new StreamMetrics();
+    m.observe({ type: "message_start", message: { usage: { input_tokens: 10, cache_read_input_tokens: 1216, cache_creation_input_tokens: 4 } } }, 0);
+    m.observe({ type: "message_delta", usage: { output_tokens: 3 } }, 1000);
+    expect(m.cacheReadTokens).toBe(1216);
+    expect(m.cacheCreationTokens).toBe(4);
+  });
+
+  it("reads OpenAI prompt_tokens_details.cached_tokens (翻译流的形状)", () => {
+    const m = new StreamMetrics();
+    m.observe({ choices: [], usage: { prompt_tokens: 1224, completion_tokens: 3, prompt_tokens_details: { cached_tokens: 1216 } } }, 0);
+    expect(m.cacheReadTokens).toBe(1216);
+    // OpenAI usage 没有 cache_creation 桶：保持 undefined（由 sse-translator 的
+    // onUsage 钩子从 Anthropic 快照补齐，见 sse-translator.test.ts）。
+    expect(m.cacheCreationTokens).toBeUndefined();
+  });
+
+  it("0 is a valid sample (presence semantics): later zero wins, absent stays undefined", () => {
+    const m = new StreamMetrics();
+    m.observe({ type: "message_start", message: { usage: { cache_read_input_tokens: 50 } } }, 0);
+    expect(m.cacheReadTokens).toBe(50);
+    // message_delta 重报 0：后来的覆盖先前的（与 usage 合并语义一致）。
+    m.observe({ type: "message_delta", usage: { cache_read_input_tokens: 0 } }, 1000);
+    expect(m.cacheReadTokens).toBe(0);
+    // 从头就没报过：undefined，不是 0。
+    const fresh = new StreamMetrics();
+    fresh.observe({ type: "message_start", message: { usage: { input_tokens: 3 } } }, 0);
+    expect(fresh.cacheReadTokens).toBeUndefined();
+    expect(fresh.cacheCreationTokens).toBeUndefined();
+  });
+
+  it("ignores malformed cache values instead of poisoning the record", () => {
+    const m = new StreamMetrics();
+    m.observe({ type: "message_start", message: { usage: { cache_read_input_tokens: NaN } } }, 0);
+    m.observe({ type: "message_start", message: { usage: { cache_creation_input_tokens: -5 } } }, 0);
+    expect(m.cacheReadTokens).toBeUndefined();
+    expect(m.cacheCreationTokens).toBeUndefined();
+  });
+});
