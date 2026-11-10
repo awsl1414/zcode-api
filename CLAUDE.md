@@ -47,7 +47,7 @@ bun run regen:mcp                                    # 离线重生成 src/mcp/o
 - **控制面 / 面板永不绑非回环**：bind 127.0.0.1 + 每请求 `remoteAddress` 复查。
 - **Bun-only 语法**：`import x from "./page.html" with { type: "text" }`、`with { type: "file" }`
   嵌资源。新增内嵌资源要同步 `scripts/build-fork-worker.ts`，否则编译产物缺那份。
-- **版本号两处**：`src/version.ts` 的 `VERSION` 与 `package.json` 的 `version`。
+- **版本号只有一个真源**：`package.json` 的 `version`；`src/version.ts` 从它派生。
 - **注释就是文档**：文件头的「为什么」引用逆向得到的 ZCode bundle 版本与压缩符号
   （`_reverse/NOTEPAD.md`，gitignore，本地常常不存在）。改行为时保留或更新依据。
 - LICENSE 是 CC BY-NC-SA 4.0（非商业），改动涉及许可声明时注意。

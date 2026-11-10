@@ -68,16 +68,18 @@ jobs:
       - name: Run tests
         run: bun test
 
-  # Commit the tag's version into package.json + src/version.ts so the repo
-  # never drifts from released artifacts again — no manual bumping. Every
-  # downstream job (builds / tag / docker) checks out this job's SHA and
-  # therefore builds from a tree that already reports the right version.
+  # Commit the tag's version into package.json so the repo never drifts from
+  # released artifacts again — no manual bumping. `package.json` is the only
+  # source: `src/version.ts` derives its VERSION from it, so one write updates
+  # the CLI, the panel and the update checker together. Every downstream job
+  # (builds / tag / docker) checks out this job's SHA and therefore builds from
+  # a tree that already reports the right version.
   #
   # Version shape: the tag rules the released version ("v5.0.0" → "5.0.0").
   # Variant suffixes between releases (e.g. "5.0.0.beta.1") are fine — the
   # update checker (src/update/check.ts versionCore) strips them before
-  # comparison, and both sed patterns below match any quoted value, so the
-  # released files still land on plain semver.
+  # comparison, and the sed pattern below matches any quoted value, so the
+  # released file still lands on plain semver.
   bump:
     needs: [detect, verify]
     runs-on: ubuntu-latest
@@ -97,27 +99,21 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin "$BRANCH"
           # Re-run of a partially-failed workflow: the bump may already be on
-          # the branch — reuse it instead of committing a duplicate. Both
-          # files must match; a partial manual bump falls through to the sed
-          # path and gets completed.
-          if git show "origin/$BRANCH:package.json" | grep -q "\"version\": \"${VERSION}\"" \
-             && git show "origin/$BRANCH:src/version.ts" | grep -q "VERSION = \"${VERSION}\""; then
+          # the branch — reuse it instead of committing a duplicate.
+          if git show "origin/$BRANCH:package.json" | grep -q "\"version\": \"${VERSION}\""; then
             echo "bump for ${VERSION} already on origin/$BRANCH — reusing it"
             echo "sha=$(git rev-parse "origin/$BRANCH")" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          sed -i "s/^export const VERSION = \".*\";$/export const VERSION = \"${VERSION}\";/" src/version.ts
           sed -i "s/^  \"version\": \".*\",$/  \"version\": \"${VERSION}\",/" package.json
-          grep -q "VERSION = \"${VERSION}\"" src/version.ts
           grep -q "\"version\": \"${VERSION}\"" package.json
-          git add package.json src/version.ts
+          git add package.json
           git commit -m "chore(release): bump version to ${VERSION}"
           if ! git push origin "HEAD:$BRANCH"; then
             # Branch moved on since dispatch — rebase and retry once. A
-            # conflict on the version files fails loudly; re-dispatch.
+            # conflict on package.json fails loudly; re-dispatch.
             git fetch origin "$BRANCH"
             git rebase "origin/$BRANCH"
-            grep -q "VERSION = \"${VERSION}\"" src/version.ts
             grep -q "\"version\": \"${VERSION}\"" package.json
             git push origin "HEAD:$BRANCH"
           fi
@@ -165,8 +161,10 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.detect.outputs.version }}
         run: |
-          grep -q "VERSION = \"${RELEASE_VERSION}\"" src/version.ts
           grep -q "\"version\": \"${RELEASE_VERSION}\"" package.json
+          # src/version.ts derives from package.json; a stray literal there
+          # would mean someone reintroduced a second source.
+          grep -q 'from "../package.json"' src/version.ts
       # build-fork-worker.ts pre-bundles the captcha worker entry so
       # `bun build --compile` embeds it as a `with { type: "file" }` asset —
       # the compiled binary has no other worker entry (see

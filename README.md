@@ -275,7 +275,7 @@ bun run dev         # 开发模式启动面板
 ### CI 与发版
 
 - **CI 必过**：`.github/workflows/ci.yml` 在每个 PR 与 master 直推上跑（类型检查 + 测试 + 面板拼装冒烟）。分支保护（Settings → Branches → Branch protection rules）把 `test` / `panel-build` 两个 check 设为 required，不绿不合并。
-- **发版手动触发**：`.github/workflows/release.yml` 只由 Actions 页面手动 dispatch（输入 tag，如 `v5.0.0`），流程：verify → 版本号自动写回 `package.json` / `src/version.ts` → 五平台二进制全部进同一个 Release（changelog 由 GitHub 按提交自动生成，tag 含 alpha/beta/rc 自动标 prerelease）。
+- **发版手动触发**：`.github/workflows/release.yml` 只由 Actions 页面手动 dispatch（输入 tag，如 `v5.0.0`），流程：verify → 版本号自动写回 `package.json`（`src/version.ts` 从它派生）→ 五平台二进制全部进同一个 Release（changelog 由 GitHub 按提交自动生成，tag 含 alpha/beta/rc 自动标 prerelease）。
 - **依赖周更**：`.github/dependabot.yml` 每周为 GitHub Actions 与 bun 依赖提升级 PR（新发布版本有 7 天冷却期）。
 
 ## Privacy
