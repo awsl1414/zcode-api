@@ -962,8 +962,6 @@
   "accounts.claim.plans.empty": "当前没有可领的活动。",
   "accounts.claim.plans.claim": "立即抢",
   "accounts.claim.plans.effectiveAt": "生效 {{time}}",
-  "accounts.claim.result.claimed": "已领取：{{plan}}",
-  "accounts.claim.result.claimedAt": "已领取：{{plan}}，{{time}} 生效",
   "error.claim_unavailable": "抢活动控制面不可用。",
   "error.claim_preview_failed": "活动列表拉取失败。",
   "error.claim_rate_limited": "活动列表被上游限流，稍后再试。",

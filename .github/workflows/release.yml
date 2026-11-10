@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "New release tag, e.g. v2.1.0"
+        description: "New release tag, e.g. v5.0.0"
         required: true
         type: string
 
@@ -74,7 +74,7 @@ jobs:
   # therefore builds from a tree that already reports the right version.
   #
   # Version shape: the tag rules the released version ("v5.0.0" → "5.0.0").
-  # Variant suffixes between releases (e.g. "4.8.8.beta.1") are fine — the
+  # Variant suffixes between releases (e.g. "5.0.0.beta.1") are fine — the
   # update checker (src/update/check.ts versionCore) strips them before
   # comparison, and both sed patterns below match any quoted value, so the
   # released files still land on plain semver.

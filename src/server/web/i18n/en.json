@@ -962,8 +962,6 @@
   "accounts.claim.plans.empty": "No claimable plans right now.",
   "accounts.claim.plans.claim": "Claim now",
   "accounts.claim.plans.effectiveAt": "Activates {{time}}",
-  "accounts.claim.result.claimed": "Claimed: {{plan}}",
-  "accounts.claim.result.claimedAt": "Claimed: {{plan}}, activates {{time}}",
   "error.claim_unavailable": "Claim control plane unavailable.",
   "error.claim_preview_failed": "Failed to fetch claimable plans.",
   "error.claim_rate_limited": "The plan list was rate-limited upstream; try again later.",

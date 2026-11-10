@@ -13,6 +13,8 @@
  *
  * 用法：bun run scripts/smoke-panel-build.ts（ci.yml panel-build job 调它）
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   renderLoginPage,
   renderPanelPage,
@@ -20,6 +22,14 @@ import {
   PAGE_COMPONENTS_CSS,
   PAGE_TOKENS_CSS,
 } from "../src/server/web/page.ts";
+
+/*
+ * 字典原文，不是 JSON import：重复键在 JSON.parse 时已被吞成「后者胜」，
+ * 要查重只能看源文本。
+ */
+const I18N_DIR = join(import.meta.dir, "..", "src", "server", "web", "i18n");
+const PAGE_I18N_ZH = readFileSync(join(I18N_DIR, "zh.json"), "utf8");
+const PAGE_I18N_EN = readFileSync(join(I18N_DIR, "en.json"), "utf8");
 
 /** page.html 的五个占位符与 login.html 的最后一个（与 page.ts 的常量对应）。 */
 const SLOTS = [
@@ -72,5 +82,44 @@ assert(
 
 assert("panel size sane", panel.length >= MIN_PANEL_BYTES, `${panel.length} bytes`);
 assert("login size sane", login.length >= MIN_LOGIN_BYTES, `${login.length} bytes`);
+
+/*
+ * Dictionary keys must be unique.
+ *
+ * A duplicate key is invisible to `JSON.parse` (last one wins) and to the
+ * tests that look keys up by name, so a second copy of an existing key lands
+ * silently and only shows up as a bundler warning. Both dictionaries are
+ * hand-edited lists of a thousand entries; the duplicates that got in here
+ * were identical copies, which is exactly the case nothing else catches.
+ */
+for (const [name, source] of [
+  ["zh", PAGE_I18N_ZH],
+  ["en", PAGE_I18N_EN],
+] as const) {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const match of source.matchAll(/^\s*"([^"]+)"\s*:/gm)) {
+    const key = match[1]!;
+    if (seen.has(key)) duplicates.add(key);
+    seen.add(key);
+  }
+  assert(
+    `${name} dictionary has no duplicate keys`,
+    duplicates.size === 0,
+    duplicates.size === 0 ? `${seen.size} keys` : [...duplicates].join(", "),
+  );
+}
+
+const zhKeys = new Set([...PAGE_I18N_ZH.matchAll(/^\s*"([^"]+)"\s*:/gm)].map((m) => m[1]!));
+const enKeys = new Set([...PAGE_I18N_EN.matchAll(/^\s*"([^"]+)"\s*:/gm)].map((m) => m[1]!));
+const onlyZh = [...zhKeys].filter((k) => !enKeys.has(k));
+const onlyEn = [...enKeys].filter((k) => !zhKeys.has(k));
+assert(
+  "dictionaries share one key set",
+  onlyZh.length === 0 && onlyEn.length === 0,
+  onlyZh.length === 0 && onlyEn.length === 0
+    ? `${zhKeys.size} keys`
+    : `zh-only: ${onlyZh.join(", ") || "-"}; en-only: ${onlyEn.join(", ") || "-"}`,
+);
 
 console.log(`panel build smoke passed: panel=${panel.length}B login=${login.length}B`);
