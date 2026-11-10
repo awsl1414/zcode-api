@@ -12,8 +12,6 @@ export interface Credential {
   secret?: string;
   /** Which provider this credential is for. */
   provider: ProviderId;
-  /** Unix timestamp (ms) when the credential expires. Present only for OAuth. */
-  expiresAt?: number;
   /** Upstream account identifier (OAuth only); LLM metadata.user_id uses a device/session JSON blob. */
   userId?: string;
   /** JWT token for start-plan (zcode.z.ai). Present when login captured the ZCode plan token. */
@@ -41,8 +39,14 @@ export function credentialString(cred: Credential): string {
   return cred.apiKey;
 }
 
-/** Check whether a credential has expired. */
-export function isExpired(cred: Credential, now: number = Date.now()): boolean {
-  if (cred.expiresAt === undefined) return false;
-  return now >= cred.expiresAt;
+/**
+ * Whether the credential can authenticate **coding-plan** traffic.
+ *
+ * coding-plan posts `x-api-key` + `Authorization: Bearer {apiKey}.{secret}`
+ * (proxy/upstream.ts buildAuthHeaders); a JWT-only credential (imported plan
+ * token) has neither and would otherwise be sent as an empty string and bounce
+ * back as a cryptic upstream 401. Callers gate on this before forwarding.
+ */
+export function hasCodingPlanKey(cred: Credential): boolean {
+  return Boolean(cred.apiKey && cred.apiKey.trim());
 }

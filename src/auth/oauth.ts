@@ -24,7 +24,7 @@
  * @see _reverse/NOTEPAD.md "4. OAuth 流程"
  */
 import type { ProviderId } from "../provider/types.js";
-import { DEFAULT_APP_VERSION } from "../config/loader.js";
+import { fallbackAppVersion } from "../config/loader.js";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
 
@@ -90,7 +90,7 @@ interface ZcodeEnvelope {
 /**
  * Common lifecycle for both login flows: `start()` produces the authorize URL,
  * `complete()` blocks until the flow finishes (callback redirect or server
- * poll), `authorize()` chains them for the CLI. `src/android/control.ts`
+ * poll), `authorize()` chains them for the CLI. `src/control/control.ts`
  * drives `start()` + `complete()` so the authorize URL can be surfaced to the
  * app while completion continues in the background.
  */
@@ -205,7 +205,7 @@ class PollOAuthClient extends OAuthFlowClient {
     fetchImpl: FetchFn = fetch,
     /** Injectable pause between polls (tests pass a no-op). */
     private readonly sleep: (ms: number) => Promise<void> = defaultSleep,
-    private readonly appVersion: string = DEFAULT_APP_VERSION,
+    private readonly appVersion: string = fallbackAppVersion(),
   ) {
     super(provider, fetchImpl);
   }
@@ -329,7 +329,7 @@ export class ZaiOAuthClient extends PollOAuthClient {
   constructor(
     fetchImpl: FetchFn = fetch,
     sleep: (ms: number) => Promise<void> = defaultSleep,
-    appVersion: string = DEFAULT_APP_VERSION,
+    appVersion: string = fallbackAppVersion(),
   ) {
     super("zai", fetchImpl, sleep, appVersion);
   }
@@ -340,10 +340,22 @@ export class BigmodelPollOAuthClient extends PollOAuthClient {
   constructor(
     fetchImpl: FetchFn = fetch,
     sleep: (ms: number) => Promise<void> = defaultSleep,
-    appVersion: string = DEFAULT_APP_VERSION,
+    appVersion: string = fallbackAppVersion(),
   ) {
     super("bigmodel", fetchImpl, sleep, appVersion);
   }
+}
+
+/**
+ * 按 provider 选 poll-flow 登录客户端，版本号是唯一可调的输入。
+ *
+ * 调用方手上有 `config.identity.appVersion` 时传进来；两处都拿不到时（容器里的
+ * 首次登录）直接用默认值，那是「探测本机客户端 > 代码默认」。
+ */
+export function createPollOAuthClient(provider: ProviderId, appVersion: string = fallbackAppVersion()): OAuthFlowClient {
+  return provider === "bigmodel"
+    ? new BigmodelPollOAuthClient(fetch, defaultSleep, appVersion)
+    : new ZaiOAuthClient(fetch, defaultSleep, appVersion);
 }
 
 // ---------------------------------------------------------------------------
@@ -420,14 +432,14 @@ export class AuthCodeOAuthClient extends OAuthFlowClient {
    * Start the localhost callback server and return the authorize URL.
    * Call `waitForCallback()` (or `authorize()`) afterwards, then `close()`.
    *
-   * The bind port is `0` (OS-assigned random) unless the env var
-   * `ZCODE_OAUTH_CALLBACK_PORT` is set, in which case that exact port is used.
-   * The Android entry sets the env var so the Custom Tabs redirect URL is
-   * predictable across launches.
+   * The bind port is always `0`: the kernel assigns a free port and the real
+   * one is read back from `address()`. Fixing a port up front would only turn
+   * a busy port into EADDRINUSE, and nothing downstream needs the number to be
+   * predictable across launches — the redirect URI is built from what the
+   * bind actually got.
    */
   start(): Promise<OAuthFlowStart> {
     const state = randomBytes(32).toString("hex");
-    const requestedPort = Number(process.env.ZCODE_OAUTH_CALLBACK_PORT ?? 0) || 0;
 
     return new Promise((resolve, reject) => {
       this.server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -438,7 +450,7 @@ export class AuthCodeOAuthClient extends OAuthFlowClient {
         this.server = null;
         reject(err);
       });
-      this.server.listen(requestedPort, "127.0.0.1", () => {
+      this.server.listen(0, "127.0.0.1", () => {
         const addr = this.server!.address();
         if (!addr || typeof addr !== "object") {
           reject(new Error("Failed to bind localhost callback server"));

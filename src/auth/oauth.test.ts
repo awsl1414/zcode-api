@@ -167,7 +167,8 @@ describe("ZaiOAuthClient (server-mediated cli login)", () => {
     const { impl } = scriptedFetch([
       () => envelopeResponse(initData()),
     ]);
-    const client = new ZaiOAuthClient(impl, async () => {});
+    /* 版本号显式给出：缺省值是「探测本机客户端」，那在开发机上不稳定 */
+    const client = new ZaiOAuthClient(impl, async () => {}, "3.17.1");
     const started = await client.start();
     try {
       const url = new URL(started.authorizeUrl);
@@ -247,7 +248,8 @@ describe("BigmodelPollOAuthClient (server-mediated cli login)", () => {
           initData({ authorize_url: "https://bigmodel.cn/login?appId=zcode&state=s" }),
         ),
     ]);
-    const client = new BigmodelPollOAuthClient(impl, async () => {});
+    /* 版本号显式给出：缺省值是「探测本机客户端」，那在开发机上不稳定 */
+    const client = new BigmodelPollOAuthClient(impl, async () => {}, "3.17.1");
     const started = await client.start();
     try {
       expect(JSON.parse(String(calls[0].init.body))).toEqual({ provider: "bigmodel" });
