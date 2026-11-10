@@ -1,0 +1,23 @@
+# zcode-proxy in a container: one published port serves the data plane and the
+# panel together, because the panel is mounted on the proxy's own listener.
+services:
+  zcode-proxy:
+    image: ghcr.io/awsl1414/zcode-proxy:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount the directory, not config.yaml alone: accounts.json, apikeys.json,
+      # users.json and policy.json (plus the runtime-written requests.jsonl,
+      # activities.jsonl and control.port) are written next to it, so backing up or
+      # moving this one directory carries the whole install. Create it first
+      # (`mkdir -p data`): Docker makes a missing bind mount as root while the
+      # container runs as uid 1000, and the first start would fail to write
+      # config.yaml.
+      - ./data:/data
+    environment:
+      # Encryption seed for the account, API-key and user stores. Pick one
+      # random string now and never change it: a different seed cannot decrypt
+      # the files it wrote, so every imported account would have to be added
+      # again.
+      ZCODE_PROXY_CREDENTIAL_SECRET: "change-me-to-a-fixed-random-string"
+    restart: unless-stopped

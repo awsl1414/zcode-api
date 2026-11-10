@@ -1,0 +1,26 @@
+# Dependabot 周更：Actions 版本 + 依赖。
+#
+# - github-actions：workflow 里 actions/xxx@v7 这类 tag 更新（PR 形式，合并前
+#   CI 全跑，升级行为与手改一致）。
+# - bun：读根目录 bun.lock（文本锁文件），依赖升级 PR 会跑 bun install +
+#   全量门禁，锁文件由 Dependabot 按它自己的解析重写——合并前注意 review
+#   bun.lock 的 diff 是否只有目标依赖。
+#
+# 周更而不是月更：这个仓库的依赖面很小（4 个运行依赖 + 3 个开发依赖），
+# 周 PR 通常只有一个包，revert 成本低；月更容易一次堆一摞。
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # 供应链护栏：新发布的版本等 7 天再提 PR，躲开「发布即投毒」的窗口。
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7

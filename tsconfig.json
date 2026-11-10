@@ -18,5 +18,5 @@
     "noEmit": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "_reverse", "dist", "src/proxy/captcha-worker-entry.bundle.js"]
+  "exclude": ["node_modules", "_reverse", "dist", "src/captcha/captcha-worker-entry.bundle.js"]
 }

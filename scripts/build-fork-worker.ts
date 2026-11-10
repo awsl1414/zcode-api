@@ -7,13 +7,13 @@
  *
  * Run before `bun build --compile` (every build:* script chains it):
  *   bun run scripts/build-fork-worker.ts
- * Output: src/proxy/captcha-worker-entry.bundle.js (gitignored build input)
+ * Output: src/captcha/captcha-worker-entry.bundle.js (gitignored build input)
  */
 import { build } from "bun";
 
 const result = await build({
-  entrypoints: ["./src/proxy/captcha-worker-entry.ts"],
-  outdir: "./src/proxy",
+  entrypoints: ["./src/captcha/captcha-worker-entry.ts"],
+  outdir: "./src/captcha",
   target: "bun",
   format: "esm",
   naming: { entry: "[dir]/[name].bundle.[ext]" },

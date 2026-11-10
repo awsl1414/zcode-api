@@ -12,7 +12,12 @@ docs
 _reverse
 .omo
 .codegraph
-Android-APP
 **/AGENTS.md
 **/*.test.ts
-src/proxy/captcha-worker-entry.bundle.js
+src/captcha/captcha-worker-entry.bundle.js
+# Compose writes the runtime state here (config.yaml, accounts.json, ...). Sending
+# it to the builder would put credentials in the build context and rebuild the
+# image whenever a log line lands in data/.
+data
+# Orca worker reports and other local scratch files.
+TASK-REPORT.md
