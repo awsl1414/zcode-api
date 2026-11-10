@@ -1,14 +1,17 @@
 /**
- * Entry point — load config, create auth manager, start proxy server.
+ * Entry point — resolve the invocation (serve vs classic CLI) and hand off.
+ *
+ * The heavy lifting lives next to what it serves: `server/bootstrap.ts` for the
+ * serve/panel lifecycle, `cli/*` for the subcommands. This file keeps only the
+ * entry wiring: argv parsing, subcommand dispatch, and `printHelp`.
  */
 import net from "node:net";
 
-// Process-wide Happy Eyeballs (2026-10-30): z.ai/alicdn CDN IPv6 answers
-// are intermittently blackholed and Node's fetch (undici) does not race
-// address families — a v6-first DNS answer wedged outbound requests
-// (captcha config/solves → persistent 503 on IPv6-preferring networks;
-// see NOTEPAD「3.17.1 增补」八轮). Node-only API; Bun's node:net shim
-// ignores it and carries its own connect behavior.
+// Process-wide Happy Eyeballs: z.ai/alicdn CDN IPv6 answers are intermittently
+// blackholed and Node's fetch (undici) does not race address families, so a
+// v6-first DNS answer wedges outbound requests (captcha config/solves end in a
+// persistent 503 on IPv6-preferring networks; NOTEPAD「3.17.1 增补」). Node-only
+// API; Bun's node:net shim ignores it and carries its own connect behavior.
 try {
   if (typeof net.setDefaultAutoSelectFamily === "function") {
     net.setDefaultAutoSelectFamily(true);
@@ -18,69 +21,57 @@ try {
   }
 } catch { /* never fatal */ }
 
-import { loadConfig } from "./config/loader.js";
-import { AuthManager } from "./auth/manager.js";
-import { startServer, type ProxyServer } from "./server/server.js";
-import {
-  startControlListener,
-  createControlDispatcher,
-  LogBuffer,
-  type ControlState,
-} from "./android/control.js";
-import { collectQuotaSnapshot } from "./server/routes-quota.js";
-import { loadCredential, saveCredential, clearCredential, getStorePath } from "./auth/store.js";
-import { ZaiOAuthClient, BigmodelOAuthClient, BigmodelPollOAuthClient, LOGIN_TIMEOUT_MS, parsePastedCallbackUrl, type OAuthResult } from "./auth/oauth.js";
-import { KeyResolver } from "./auth/resolver.js";
-import type { Credential } from "./auth/types.js";
-import type { ProviderId } from "./provider/types.js";
-import type { ProxyConfig } from "./config/types.js";
-import { updateConfigYaml, ensureConfigFile } from "./config/edit.js";
-import { openBrowser } from "./runtime/open-browser.js";
-import { pasteLoginInstructions, readPastedLine, boldIfTTY } from "./runtime/paste-login.js";
-import { buildServerOptions } from "./server/server-options.js";
-import {
-  resolvePanelSettings,
-  startPanelServer,
-  type ControlDispatcher,
-  type PanelServer,
-  type PanelSettings,
-} from "./server/panel.js";
-import { checkForUpdate } from "./update/check.js";
-import { shutdownAllHighspeed } from "./highspeed/manager.js";
-import { readFileSync, existsSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
-import { randomUUID } from "node:crypto";
-import { ensureNodeFetchNoTimeouts } from "./runtime/node-fetch-compat.js";
+import { serve } from "./server/bootstrap.js";
+import { authCommand } from "./cli/auth.js";
+import { claimCommand, quotaCommand } from "./cli/claim.js";
+import { logsCommandAsync } from "./cli/logs.js";
+import { cliFailure } from "./cli/control.js";
+import { printHelp } from "./cli/shared.js";
+import { riskCommand, routingCommand } from "./cli/routing.js";
+import { VERSION } from "./version.js";
 
-export const VERSION = "4.8.8.android";
+/**
+ * 子命令的公共字面量，**必须**声明在 `main()` 调用之前。
+ *
+ * `main()` 在模块顶部同步执行，而模块其余常量要等模块求值结束才初始化，那时再读
+ * 就是 TDZ（`config/edit.ts::ensureDeviceMidInConfig` 的注释里记录过同一个坑）。
+ * 只有**同步路径**（参数解析）会读到的常量才留在这里；`--json` 是 CLI 子命令的
+ * 字面量，放在 `cli/shared.ts`，渲染层的常量留在 `cli/render.ts`。
+ */
+const NO_PANEL_FLAG = "--no-panel";
+
+/** `serve` 的 debug 开关（`zcode-proxy debug` / `serve debug` 两种写法都认）。*/
+const DEBUG_TOKEN = "debug";
 
 if (require.main === module) main();
 
 export interface ServeArgs {
   configPath?: string;
   debug: boolean;
+  /** `--no-panel`: skip the web panel for this start (headless / Docker). */
+  noPanel: boolean;
 }
 
 /**
- * Parse `serve` subcommand arguments. The token `debug` toggles debug mode;
- * any other token is treated as the config path. Order-independent:
- *   []                → { debug: false }
- *   ["debug"]         → { debug: true }
- *   ["my.yaml"]       → { configPath: "my.yaml", debug: false }
- *   ["debug","x.yaml"] → { configPath: "x.yaml", debug: true }
- *   ["x.yaml","debug"] → { configPath: "x.yaml", debug: true }
+ * Parse `serve` subcommand arguments. The token `debug` toggles debug mode,
+ * `--no-panel` disables the web panel, and any other token is treated as the
+ * config path. Order-independent:
+ *   []                     → { debug: false, noPanel: false }
+ *   ["debug"]              → { debug: true, noPanel: false }
+ *   ["--no-panel"]         → { debug: false, noPanel: true }
+ *   ["my.yaml"]            → { configPath: "my.yaml", debug: false, noPanel: false }
+ *   ["debug","x.yaml"]     → { configPath: "x.yaml", debug: true, noPanel: false }
+ *   ["x.yaml","debug"]     → { configPath: "x.yaml", debug: true, noPanel: false }
  */
-export function parseServeArgs(args: string[]): ServeArgs {
-  const debug = args.includes("debug");
-  const configPath = args.find((a) => a !== "debug");
-  return { configPath, debug };
+export function parseServeArgs(args: readonly string[]): ServeArgs {
+  return {
+    configPath: args.find((a) => a !== DEBUG_TOKEN && a !== NO_PANEL_FLAG),
+    debug: args.includes(DEBUG_TOKEN),
+    noPanel: args.includes(NO_PANEL_FLAG),
+  };
 }
 
 function main(): void {
-  // Fire-and-forget is race-safe: the dynamic import resolves in a microtask,
-  // before the listener's event-loop callback can admit a request.
-  void ensureNodeFetchNoTimeouts();
   try {
     runCli();
   } catch (err) {
@@ -89,29 +80,40 @@ function main(): void {
   }
 }
 
-function runCli(): void {
-  const args = process.argv.slice(2);
+/**
+ * 一次启动的走向：`serve`（默认面）还是一条 CLI 子命令。
+ *
+ * **裸调用就是 serve**：`zcode-proxy`、`zcode-proxy debug`、`zcode-proxy my.yaml`、
+ * `zcode-proxy --no-panel` 全部落到 serve + 网页面板；`tui` 不是别名，会走 CLI
+ * 分派并得到明确的"已移除"错误。
+ * 只有显式的 `--cli` 前缀回到经典子命令分派（裸 `--cli` = serve）。
+ */
+export type Invocation =
+  | { kind: "serve"; args: ServeArgs }
+  | { kind: "cli"; args: string[] };
 
-  // `--cli` opts out of the default TUI and restores the classic CLI dispatch
-  // (bare `--cli` = the old no-arg default: serve).
-  if (args[0] === "--cli") {
-    dispatchCli(args.slice(1));
+/** `*.yaml` / `*.yml` 也是 serve 的简写：直接给配置文件路径就是启动服务，
+ *  不必先写 `serve`（`zcode-proxy config.yaml`）。*/
+function isConfigPathToken(token: string): boolean {
+  return token.endsWith(".yaml") || token.endsWith(".yml");
+}
+
+export function resolveInvocation(argv: readonly string[]): Invocation {
+  const [first] = argv;
+  if (first === "--cli") return { kind: "cli", args: argv.slice(1) };
+  if (first === undefined || first === DEBUG_TOKEN || first === NO_PANEL_FLAG || isConfigPathToken(first)) {
+    return { kind: "serve", args: parseServeArgs(argv) };
+  }
+  return { kind: "cli", args: [...argv] };
+}
+
+function runCli(): void {
+  const invocation = resolveInvocation(process.argv.slice(2));
+  if (invocation.kind === "serve") {
+    void serve(invocation.args);
     return;
   }
-  // Default surface is the TUI. Bare invocation, the retired `tui` token
-  // (kept as a silent alias), and tui-style args (`debug`, `*.yaml`) all land
-  // here — the former `tui <args>` subcommand simply dropped its prefix.
-  if (
-    args.length === 0 ||
-    args[0] === "tui" ||
-    args[0] === "debug" ||
-    args[0].endsWith(".yaml") ||
-    args[0].endsWith(".yml")
-  ) {
-    launchTui(parseServeArgs(args[0] === "tui" ? args.slice(1) : args));
-    return;
-  }
-  dispatchCli(args);
+  dispatchCli(invocation.args);
 }
 
 /** Classic CLI dispatch — subcommand routing where bare = serve. */
@@ -124,23 +126,24 @@ function dispatchCli(args: string[]): void {
     void claimCommand(args.slice(1));
   } else if (cmd === "quota") {
     void quotaCommand();
-  } else if (cmd === "android") {
-    // Explicit catch: an async startup failure (e.g. control port already
-    // bound by an orphaned process) must exit non-zero deterministically, not
-    // surface as an unhandled rejection.
-    runAndroid().catch((err: unknown) => {
-      process.stderr.write(`zcode-proxy: android entry failed: ${(err as Error).stack ?? String(err)}\n`);
-      process.exit(1);
-    });
+  } else if (cmd === "logs") {
+    // 按请求追溯：读的是 dump 文件，所以一次性进程里也能用（见 cli/logs.ts 文件头）。
+    void logsCommandAsync(args.slice(1));
+  } else if (cmd === "routing") {
+    void routingCommand(args.slice(1)).catch(cliFailure("routing"));
+  } else if (cmd === "risk") {
+    void riskCommand(args.slice(1)).catch(cliFailure("risk"));
   } else if (cmd === "tui") {
-    // Kept for muscle memory under `--cli`: the default dispatch already
-    // routes `tui` to the TUI, but `--cli tui` should not regress to an error.
-    launchTui(parseServeArgs(args.slice(1)));
-  } else if (cmd === "serve" || cmd.endsWith(".yaml") || cmd.endsWith(".yml")) {
-    const serveArgs = cmd === "serve"
-      ? parseServeArgs(args.slice(1))
-      : parseServeArgs(args);
-    serve(serveArgs.configPath, serveArgs.debug);
+    // 终端界面已移除，网页面板接管了它的全部功能。这里必须**明确报错**而不是静默
+    // 退回 serve：静默会让「我以为我在 TUI 里」变成一句跑完就没的日志。
+    console.error(
+      "The terminal UI was removed in 5.0. Use `zcode-proxy` for the web panel,\n" +
+        "or `zcode-proxy --cli <cmd>` for the classic CLI.",
+    );
+    process.exit(1);
+  } else if (cmd === "serve" || cmd === DEBUG_TOKEN || cmd === NO_PANEL_FLAG || isConfigPathToken(cmd)) {
+    const serveArgs = cmd === "serve" ? parseServeArgs(args.slice(1)) : parseServeArgs(args);
+    void serve(serveArgs);
   } else if (cmd === "version" || cmd === "--version" || cmd === "-v") {
     console.log(`zcode-proxy ${VERSION}`);
   } else if (cmd === "help" || cmd === "--help" || cmd === "-h") {
@@ -150,848 +153,4 @@ function dispatchCli(args: string[]): void {
     printHelp();
     process.exit(1);
   }
-}
-
-function launchTui(args: ServeArgs): void {
-  // Dynamic import: the TUI module imports helpers back from this file, so a
-  // static edge would create a load-time cycle (same pattern as claimCommand).
-  import("./tui/app.js")
-    .then((m) => m.runTui(args))
-    .catch((err: unknown) => {
-      process.stderr.write(`zcode-proxy: tui failed: ${(err as Error).stack ?? String(err)}\n`);
-      process.exit(1);
-    });
-}
-
-function printHelp(): void {
-  console.log(`zcode-proxy ${VERSION}
-
-Usage:
-  zcode-proxy                       Interactive terminal UI (default):
-                                    login, start/stop, live logs
-  zcode-proxy [debug] [config.yaml] Same, with debug diagnostics / custom config
-  zcode-proxy serve [config.yaml]   Start the proxy server (classic CLI mode)
-  zcode-proxy serve debug [config.yaml]
-                                    Start with verbose per-request diagnostics
-  zcode-proxy --cli                 Classic CLI mode (bare --cli = serve)
-  zcode-proxy android               Android entry: proxy + localhost control listener
-  zcode-proxy auth login <provider> Login via OAuth (provider: zai | bigmodel)
-  zcode-proxy auth login <provider> --import
-                                    Import API key from ~/.zcode/v2/config.json
-  zcode-proxy auth logout           Clear stored credentials
-  zcode-proxy auth status           Show current authentication state
-  zcode-proxy claim [list|now]      List / claim weekend-plan trial packages
-  zcode-proxy quota                 Show plan quota (per-model remaining/total)
-  zcode-proxy version               Show version
-  zcode-proxy help                  Show this help
-
-Examples:
-  zcode-proxy                       Terminal UI: login, start/stop, live logs
-  zcode-proxy debug                 Terminal UI with per-request diagnostics
-  zcode-proxy serve debug           CLI: start with extra debug logging
-  zcode-proxy auth login bigmodel   OAuth login for Bigmodel
-  zcode-proxy auth login bigmodel --import
-                                    Import existing key from ZCode config
-  zcode-proxy auth status           Check if logged in
-`);
-}
-
-/**
- * Mirror console output into a ring buffer so the panel's Logs card has data.
- * Same tee the Android entry installs — the buffer is also what `getLogs` reads.
- */
-function installLogTee(): LogBuffer {
-  const buffer = new LogBuffer();
-  const origLog = console.log;
-  const origErr = console.error;
-  const origWarn = console.warn;
-  console.log = (...args: unknown[]) => { buffer.push(args.join(" ")); origLog(...args); };
-  console.error = (...args: unknown[]) => { buffer.push("[error] " + args.join(" ")); origErr(...args); };
-  console.warn = (...args: unknown[]) => { buffer.push("[warn] " + args.join(" ")); origWarn(...args); };
-  return buffer;
-}
-
-/**
- * Loopback spellings that keep the panel unexposed (same set the config loader
- * accepts for http:// origins). Anything else was an explicit `ZCODE_PANEL_HOST`
- * and gets the startup warning below.
- */
-function isLoopbackPanelHost(host: string): boolean {
-  return host === "127.0.0.1" || host === "localhost" || host === "::1";
-}
-
-/**
- * Start the optional web panel for `serve`. `serve` has no TUI, so this is the
- * only way to see quota, read live logs or switch provider/plan on a headless
- * box without `docker exec`.
- *
- * Commands are dispatched in-process through `createControlDispatcher()` — the
- * same protocol the Android shell drives over `POST /control`, without opening a
- * second, unauthenticated loopback port. The panel token is therefore the only
- * way in.
- *
- * The proxy lifecycle hooks mirror `runAndroid` on purpose: `serve` starts the
- * proxy eagerly, so `serverRef` is pre-filled and the start/stop commands only
- * matter for restarts (including the `stop_proxy_first` rule before setConfig).
- *
- * Two behaviours are panel-only and stay out of the shared control layer: the
- * `shutdown` command unwinds the whole process (through the same path as the
- * signals, so it works after the proxy was stopped from the page), and a
- * logout/login re-syncs the live credential — see `handleControl` below.
- */
-async function startServePanel(
-  settings: PanelSettings,
-  ctx: {
-    config: ProxyConfig;
-    path: string;
-    auth: AuthManager;
-    serverRef: { current: ProxyServer | null };
-    logBuffer: LogBuffer;
-    /** Unwind the process; independent of whether the proxy is still running. */
-    shutdown: () => void;
-  },
-): Promise<PanelServer> {
-  const { config, path, auth, serverRef, logBuffer, shutdown } = ctx;
-
-  // The panel can log out (or log in another account) while `serve` keeps
-  // running, but AuthManager caches the credential in memory and auto-claim
-  // prefers it over the store — so a disk-only change would leave `/v1` and
-  // auto-claim serving the account that was just replaced (issue #58 review,
-  // P2). Fingerprint the store and re-sync after every panel command: the
-  // page polls `getLogs` every 2s, so a background login lands within one poll.
-  let authFingerprint = JSON.stringify((await loadCredential().catch(() => null)) ?? null);
-
-  async function syncAuthWithDisk(): Promise<void> {
-    const onDisk = await loadCredential().catch(() => null);
-    const fingerprint = JSON.stringify(onDisk ?? null);
-    if (fingerprint === authFingerprint) return;
-    authFingerprint = fingerprint;
-    if (onDisk) {
-      auth.setOAuthCredential(onDisk);
-      console.log("auth: switched to the account now on disk");
-    } else {
-      auth.clearOAuthCredential();
-      console.log("auth: credential cleared (logged out)");
-    }
-  }
-
-  const controlState: ControlState = {
-    provider: config.provider,
-    plan: config.plan,
-    proxyPort: serverRef.current?.port ?? 0,
-  };
-
-  async function startProxy(): Promise<{ ok: true; port: number } | { ok: false; error: string }> {
-    if (serverRef.current) return { ok: false, error: "already_running" };
-    const cred = await loadCredential().catch(() => null);
-    if (!cred) return { ok: false, error: "not_logged_in" };
-    auth.setOAuthCredential(cred);
-    authFingerprint = JSON.stringify(cred);
-    try {
-      const s = await startServer(buildServerOptions(config, auth, false));
-      serverRef.current = s;
-      console.log(`zcode-proxy listening on http://${s.hostname}:${s.port}`);
-      return { ok: true, port: s.port };
-    } catch (err) {
-      return { ok: false, error: (err as Error).message };
-    }
-  }
-
-  async function stopProxy(): Promise<{ ok: true } | { ok: false; error: string }> {
-    const s = serverRef.current;
-    if (!s) return { ok: false, error: "not_running" };
-    try {
-      s.stop(false);
-      serverRef.current = null;
-      console.log("zcode-proxy stopped");
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: (err as Error).message };
-    }
-  }
-
-  async function setConfig(changes: {
-    provider?: ProviderId;
-    plan?: "coding-plan" | "start-plan";
-  }): Promise<{ ok: true; provider: ProviderId; plan: "coding-plan" | "start-plan" } | { ok: false; error: string }> {
-    if (serverRef.current) return { ok: false, error: "stop_proxy_first" };
-    if (changes.provider) config.provider = changes.provider;
-    if (changes.plan) config.plan = changes.plan;
-    updateConfigYaml(path, { provider: config.provider, plan: config.plan });
-    console.log(`config updated: provider=${config.provider} plan=${config.plan}`);
-    return { ok: true, provider: config.provider, plan: config.plan };
-  }
-
-  // Dispatched in-process: the panel already guards its own transport with a
-  // token, so a second loopback listener would only add an unauthenticated way
-  // to reach stopProxy / logout / shutdown (issue #58 review, P1) and a second
-  // thing to clean up when the panel fails to start (P2, now structurally gone).
-  const dispatchControl = createControlDispatcher(controlState, {
-    logBuffer,
-    onStartProxy: startProxy,
-    onStopProxy: stopProxy,
-    onSetConfig: setConfig,
-    onQuota: () => collectQuotaSnapshot(config),
-  });
-
-  /** Grace period for the `shutdown` reply before `process.exit()` runs. */
-  const SHUTDOWN_REPLY_GRACE_MS = 50;
-
-  /**
-   * The panel's transport wrapper. Two panel-only responsibilities live here
-   * rather than in the shared control layer, so the Android protocol keeps its
-   * existing semantics:
-   *
-   * - `shutdown` answers first and unwinds afterwards. Exiting inside the
-   *   command would truncate the reply the page is waiting for, and it unwinds
-   *   through the same path as SIGTERM/SIGINT, so it works whether or not the
-   *   proxy is still running (issue #58 review, P2).
-   * - Every other successful command re-syncs the live credential with the
-   *   store, and a logout while the proxy runs stops it. Otherwise `/v1` and
-   *   auto-claim keep spending the account that was just logged out (issue #58
-   *   review, P2).
-   */
-  const handleControl: ControlDispatcher = async (cmd) => {
-    if (cmd.cmd === "shutdown") {
-      setTimeout(shutdown, SHUTDOWN_REPLY_GRACE_MS);
-      return { ok: true, event: "shuttingDown" };
-    }
-    const res = await dispatchControl(cmd);
-    if (!res.ok) return res;
-    await syncAuthWithDisk();
-    if (cmd.cmd === "logout" && serverRef.current) {
-      await stopProxy();
-      controlState.proxyPort = 0;
-      console.log("panel: logout cleared the live credential — proxy stopped");
-    }
-    return res;
-  };
-
-  const panel = await startPanelServer({
-    port: settings.port,
-    hostname: settings.host,
-    token: settings.token,
-    handleControl,
-  });
-  console.log(`panel: http://${panel.hostname}:${panel.port} (token required)`);
-  // A non-loopback bind (the Docker bridge escape hatch, `ZCODE_PANEL_HOST`)
-  // is safe only as long as the token is strong and the port stays firewalled
-  // past the host that needs it — say so at startup, not only in the docs.
-  if (!isLoopbackPanelHost(panel.hostname)) {
-    console.warn(
-      `panel: bound to ${panel.hostname} — anyone who reaches this port with the token can stop the proxy, log out, or shut down`,
-    );
-  }
-
-  return panel;
-}
-
-async function serve(configPath: string | undefined, debug: boolean): Promise<void> {
-  const path = configPath ?? process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
-  if (ensureConfigFile(path)) {
-    ensureDeviceMidInConfig(path);
-    console.log(`Created ${path} from bundled template.`);
-    console.log(`Run: zcode-proxy auth login <zai|bigmodel>\n`);
-  }
-  const config = loadConfig(path);
-
-  // Optional web panel (issue #58). Resolved early so console output from the
-  // startup path below is already captured for the panel's Logs card.
-  const panelSettings = resolvePanelSettings();
-  const panelLogBuffer = panelSettings ? installLogTee() : null;
-
-  const auth = new AuthManager();
-  const cred = await loadCredential();
-  if (!cred) {
-    console.error("Not logged in. Run: zcode-proxy auth login " + config.provider);
-    process.exit(1);
-  }
-  auth.setOAuthCredential(cred);
-
-  if (debug) printDebugBanner(config, path, cred);
-
-  const server = await startServer(buildServerOptions(config, auth, debug));
-  // The optional panel can stop and restart the proxy, so the signal handlers
-  // and the lifecycle hooks go through this ref rather than the initial handle.
-  const serverRef: { current: ProxyServer | null } = { current: server };
-  const url = `http://${server.hostname}:${server.port}`;
-  console.log(`zcode-proxy listening on ${url}`);
-  // Handles for the background timers started below, so `shutdown` can clear
-  // them without the proxy handle being involved (issue #58 review, P2).
-  let claimScheduler: { stop: () => void } | null = null;
-  let captchaModule: { shutdownCaptcha: () => void } | null = null;
-
-  if (config.plan === "start-plan") {
-    // Pre-solve the captcha token pool in the background so first requests
-    // don't pay the full solve latency (in-process happy-dom backend).
-    import("./proxy/captcha.js")
-      .then(async (m) => {
-        captchaModule = m;
-        await m.startCaptchaPool(config.identity.appVersion);
-      })
-      .catch((err) => console.error(`[captcha] pool warmup failed: ${(err as Error).message}`));
-  }
-  if (config.claim.enabled && config.claim.auto) {
-    import("./claim/runtime.js")
-      .then((m) => {
-        claimScheduler = m.startAutoClaim(config, auth);
-        console.log(`  claim: auto ON (poll ${Math.round(config.claim.pollIntervalMs / 1000)}s)`);
-      })
-      .catch((err) => console.error(`[claim] scheduler failed to start: ${(err as Error).message}`));
-  }
-  console.log(`  provider: ${config.provider}`);
-  console.log(`  plan: ${config.plan}`);
-  console.log(`  models: ${config.models.length} available`);
-  if (config.responses.enabled) console.log(`  /v1/responses: ON`);
-  if (config.async.enabled) {
-    console.log(config.plan === "coding-plan" ? `  /async/v1/*: ON` : `  /async/v1/*: OFF (requires plan "coding-plan")`);
-  }
-  if (debug) console.log(`  debug: ON`);
-
-  // Update notice (issue #60): fire-and-forget — a slow or blocked GitHub must
-  // never delay startup, and every failure mode is silent (see update/check.ts).
-  // In a container the hint is the compose command: the image cannot self-update.
-  void checkForUpdate(VERSION).then((result) => {
-    if (result.kind === "update") console.log(`  update: ${result.notice.text}`);
-  });
-
-  let panelRuntime: PanelServer | null = null;
-
-  const closePanel = (): void => {
-    if (!panelRuntime) return;
-    void panelRuntime.close().catch(() => {});
-  };
-
-  // Single shutdown path, shared by the signals and the panel's `shutdown`
-  // command. It must not depend on `serverRef`: the page can stop the proxy,
-  // and the timers below keep the event loop alive, so "the proxy is already
-  // stopped" is not the same as "there is nothing left to do" — without this,
-  // SIGTERM/SIGINT and `docker stop` hung until the kill timeout after a
-  // panel-side Stop proxy (issue #58 review, P2).
-  let shuttingDown = false;
-  const shutdown = (): void => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    closePanel();
-    const cleared: string[] = [];
-    if (claimScheduler) {
-      try {
-        claimScheduler.stop();
-        cleared.push("auto-claim");
-      } catch {
-        /* already stopped */
-      }
-      claimScheduler = null;
-    }
-    if (captchaModule) {
-      try {
-        captchaModule.shutdownCaptcha();
-        cleared.push("captcha pool");
-      } catch {
-        /* pool never started */
-      }
-      captchaModule = null;
-    }
-    try {
-      shutdownAllHighspeed(); // heartbeats are unref'd but stopped explicitly on shutdown
-      cleared.push("highspeed");
-    } catch {
-      /* loop never ignited */
-    }
-    if (cleared.length > 0) console.log(`shutdown: cleared ${cleared.join(" + ")} timers`);
-    if (serverRef.current) {
-      // Closes the listener and exits the process (`stop(true)`).
-      serverRef.current.stop(true);
-      return;
-    }
-    console.log("shutdown: proxy already stopped — exiting");
-    process.exit(0);
-  };
-
-  if (panelSettings && panelLogBuffer) {
-    try {
-      panelRuntime = await startServePanel(panelSettings, {
-        config,
-        path,
-        auth,
-        serverRef,
-        logBuffer: panelLogBuffer,
-        shutdown,
-      });
-    } catch (err) {
-      // The panel is a convenience layer; it must never take the proxy down.
-      console.error(`[panel] failed to start: ${(err as Error).message}`);
-    }
-  }
-
-  process.on("SIGINT", () => {
-    console.log("\nShutting down...");
-    shutdown();
-  });
-  process.on("SIGTERM", () => {
-    shutdown();
-  });
-}
-
-/**
- * Desktop-Linux identity defaults for the Android entry (anti-pattern #34).
- * Without these, the Node process on Android reports its true host values:
- * `X-Platform: linux-arm64` and `X-Os-Version: 6.1.xx-android14-…` — a kernel
- * string no real ZCode desktop emits. `identity.ts` reads these env vars per
- * request, so setting them once here retargets every upstream call. Values are
- * deliberately CONSTANT (Ubuntu 24.04 x64 profile — the largest desktop-Linux
- * population): kernel strings are shared by millions of real machines, and
- * stability is required by anti-pattern #13 (never randomize fingerprints).
- * Explicit env values (adb shell setprop / NodeRunner) still win — each is set
- * with `??`, not unconditionally.
- */
-export function applyAndroidIdentityDefaults(): void {
-  process.env.ZCODE_IDENTITY_PLATFORM = process.env.ZCODE_IDENTITY_PLATFORM ?? "linux";
-  process.env.ZCODE_IDENTITY_ARCH = process.env.ZCODE_IDENTITY_ARCH ?? "x64";
-  process.env.ZCODE_IDENTITY_RELEASE = process.env.ZCODE_IDENTITY_RELEASE ?? "6.8.0-49-generic";
-}
-
-/**
- * Android entry — starts the proxy plus a localhost control listener.
- * Caller (Kotlin shell) must set env: ZCODE_CONTROL_PORT (control listener),
- * ZCODE_OAUTH_CALLBACK_PORT (fixed OAuth callback port for WebView redirect).
- */
-async function runAndroid(): Promise<void> {
-  applyAndroidIdentityDefaults();
-  const path = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
-  ensureConfigFile(path);
-  const config = loadConfig(path);
-
-  const logBuffer = new LogBuffer();
-  const origLog = console.log;
-  const origErr = console.error;
-  const origWarn = console.warn;
-  console.log = (...args: unknown[]) => { logBuffer.push(args.join(" ")); origLog(...args); };
-  console.error = (...args: unknown[]) => { logBuffer.push("[error] " + args.join(" ")); origErr(...args); };
-  console.warn = (...args: unknown[]) => { logBuffer.push("[warn] " + args.join(" ")); origWarn(...args); };
-
-  const auth = new AuthManager();
-
-  // Captcha module handle for the start-plan pool warmup (started in
-  // startProxy, stopped whenever the proxy stops) — mirrors serve()'s
-  // warmup. On Android this also brings up the persistent captcha workers
-  // (ZCODE_CAPTCHA_WARM_WORKERS, injected by NodeRunner).
-  let captchaModule: { shutdownCaptcha: () => void } | null = null;
-  const stopCaptchaPoolRuntime = (): void => {
-    try { captchaModule?.shutdownCaptcha(); } catch {}
-    captchaModule = null;
-  };
-
-  const serverRef: { current: ProxyServer | null } = { current: null };
-
-  async function startProxy(): Promise<{ ok: true; port: number } | { ok: false; error: string }> {
-    if (serverRef.current) return { ok: false, error: "already_running" };
-    const cred = await loadCredential().catch(() => null);
-    if (!cred) return { ok: false, error: "not_logged_in" };
-    auth.setOAuthCredential(cred);
-    try {
-      const s = await startServer(buildServerOptions(config, auth, false));
-      serverRef.current = s;
-      console.log(`zcode-proxy listening on http://${s.hostname}:${s.port}`);
-      if (config.plan === "start-plan") {
-        // Mirror serve(): size the pool, start background refill and prefill
-        // — previously Android never initialized the pool at all (every take
-        // hit an empty-pool race + one urgent refill). The prefill also warms
-        // the persistent captcha workers on this platform.
-        import("./proxy/captcha.js")
-          .then(async (m) => {
-            captchaModule = m;
-            await m.startCaptchaPool(config.identity.appVersion);
-          })
-          .catch((err) => console.error(`[captcha] pool warmup failed: ${(err as Error).message}`));
-      }
-      return { ok: true, port: s.port };
-    } catch (err) {
-      return { ok: false, error: (err as Error).message };
-    }
-  }
-
-  async function stopProxy(): Promise<{ ok: true } | { ok: false; error: string }> {
-    const s = serverRef.current;
-    if (!s) return { ok: false, error: "not_running" };
-    try {
-      s.stop(false);
-      serverRef.current = null;
-      stopCaptchaPoolRuntime();
-      console.log("zcode-proxy stopped");
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: (err as Error).message };
-    }
-  }
-
-  async function setConfig(changes: {
-    provider?: ProviderId;
-    plan?: "coding-plan" | "start-plan";
-  }): Promise<{ ok: true; provider: ProviderId; plan: "coding-plan" | "start-plan" } | { ok: false; error: string }> {
-    if (serverRef.current) return { ok: false, error: "stop_proxy_first" };
-    if (changes.provider) config.provider = changes.provider;
-    if (changes.plan) config.plan = changes.plan;
-    updateConfigYaml(path, { provider: config.provider, plan: config.plan });
-    console.log(`config updated: provider=${config.provider} plan=${config.plan}`);
-    return { ok: true, provider: config.provider, plan: config.plan };
-  }
-
-  console.log("control listener ready; proxy stopped — use startProxy command to start");
-
-  if (config.claim.enabled && config.claim.auto) {
-    import("./claim/runtime.js")
-      .then((m) => {
-        m.startAutoClaim(config, auth);
-        console.log(`[claim] auto ON (poll ${Math.round(config.claim.pollIntervalMs / 1000)}s; waits for login)`);
-      })
-      .catch((err) => console.error(`[claim] scheduler failed to start: ${(err as Error).message}`));
-  }
-
-  const controlPort = Number(process.env.ZCODE_CONTROL_PORT ?? 0) || 0;
-  const controlState: ControlState = {
-    provider: config.provider,
-    plan: config.plan,
-    proxyPort: serverRef.current?.port ?? 0,
-  };
-  const controlListener = await startControlListener({
-    port: controlPort,
-    state: controlState,
-    logBuffer,
-    onStartProxy: startProxy,
-    onStopProxy: stopProxy,
-    onSetConfig: setConfig,
-    onQuota: () => collectQuotaSnapshot(config),
-    onShutdown: async () => {
-      serverRef.current?.stop(true);
-      stopCaptchaPoolRuntime();
-    },
-  });
-
-  console.log(`control listener: 127.0.0.1:${controlPort}`);
-  console.log(`provider: ${config.provider}`);
-  console.log(`plan: ${config.plan}`);
-
-  process.on("SIGINT", () => {
-    stopCaptchaPoolRuntime();
-    void controlListener.close().then(() => serverRef.current?.stop(true));
-  });
-  process.on("SIGTERM", () => {
-    stopCaptchaPoolRuntime();
-    void controlListener.close().then(() => serverRef.current?.stop(true));
-  });
-}
-
-function printDebugBanner(config: ProxyConfig, path: string, cred: Credential | null): void {
-  const credShape = cred
-    ? `${cred.apiKey.slice(0, 6)}...${cred.apiKey.slice(-4)} (${cred.apiKey.length} chars)`
-    : "(none)";
-  const active = config.providers[config.provider];
-  console.log("=== zcode-proxy DEBUG MODE ===");
-  console.log(`  config file: ${path}`);
-  console.log(`  server: ${config.server.host}:${config.server.port}`);
-  console.log(`  proxy api key: ${config.auth.proxyApiKey ? "required" : "open (no client auth)"}`);
-  console.log(`  provider: ${config.provider}`);
-  console.log(`  plan: ${config.plan}`);
-  console.log(`  identity: appVersion=${config.identity.appVersion} sourceTitle=${config.identity.sourceTitle} referer=${config.identity.refererOrigin}`);
-  console.log(`  client identity: mode=${config.clientIdentity.mode} ttl=${config.clientIdentity.ttlSeconds}s max=${config.clientIdentity.maxSessions}`);
-  console.log(`  anthropic base: ${active.anthropicBase}`);
-  console.log(`  openai base:    ${active.openaiBase}`);
-  console.log(`  credential: ${credShape}`);
-  console.log(`  models (${config.models.length}): ${config.models.join(", ")}`);
-  console.log(`  log level: ${config.logging.level}`);
-  console.log("===============================");
-}
-
-function authCommand(args: string[]): void {
-  const sub = args[0];
-
-  if (sub === "login") {
-    authLogin(args.slice(1));
-  } else if (sub === "logout") {
-    authLogout();
-  } else if (sub === "status") {
-    authStatus();
-  } else {
-    console.error("Usage: zcode-proxy auth <login|logout|status>");
-    process.exit(1);
-  }
-}
-
-async function claimCommand(args: string[]): Promise<void> {
-  const sub = args[0] ?? "now";
-  if (sub !== "list" && sub !== "now") {
-    console.error("Usage: zcode-proxy claim [list|now]");
-    process.exit(1);
-  }
-  const path = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
-  if (!existsSync(path)) {
-    console.error(`Config file not found: ${path} (run serve once or create it).`);
-    process.exit(1);
-  }
-  // The billing gateway requires a stable X-Device-Mid — self-heal configs
-  // created before the deviceMid feature (idempotent: reuses existing value).
-  ensureDeviceMidInConfig(path);
-  const config = loadConfig(path);
-  try {
-    const { runClaimCli } = await import("./claim/runtime.js");
-    await runClaimCli(config, sub);
-  } catch (err) {
-    console.error(`claim failed: ${(err as Error).message}`);
-    process.exit(1);
-  }
-}
-
-/**
- * `quota` subcommand — print the live quota snapshot: per-model credit buckets
- * (billing plane) and coding-plan usage windows (monitor plane). Reuses
- * collectQuotaSnapshot (same path GET /quota serves).
- */
-async function quotaCommand(): Promise<void> {
-  const path = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
-  if (!existsSync(path)) {
-    console.error(`Config file not found: ${path} (run serve once or create it).`);
-    process.exit(1);
-  }
-  ensureDeviceMidInConfig(path);
-  const config = loadConfig(path);
-  try {
-    const { collectQuotaSnapshot } = await import("./server/routes-quota.js");
-    const snap = await collectQuotaSnapshot(config);
-    if (snap.balances.length === 0) {
-      console.log("No balance windows reported by the billing endpoint.");
-    }
-    for (const b of snap.balances) {
-      const exp = b.expiresAt ? ` · expires ${fmtQuotaExpiry(b.expiresAt)}` : "";
-      console.log(`  ${b.showName || "(unnamed)"}: ${b.remainingUnits.toLocaleString("en-US")} / ${b.totalUnits.toLocaleString("en-US")} units${exp}`);
-    }
-    if (snap.codingPlan) {
-      const { level, limits } = snap.codingPlan;
-      if (limits.length === 0) {
-        console.log("No coding-plan usage windows reported by the monitor endpoint.");
-      }
-      for (const l of limits) {
-        const tier = level ? ` (${level})` : "";
-        // Mirror of the official panel: remaining only — upstream `number` is
-        // not a comparable total (live TIME_LIMIT row: remaining=3894, number=1).
-        const amount =
-          l.remaining !== undefined
-            ? `${l.remaining.toLocaleString("en-US")}${l.unit ? ` ${l.unit}` : ""} remaining`
-            : "no usage numbers reported";
-        const reset = l.nextResetTime !== undefined ? ` · resets ${fmtQuotaExpiry(l.nextResetTime)}` : "";
-        console.log(`  coding-plan${tier}: [${l.type}] ${amount}${reset}`);
-      }
-    }
-    for (const plan of snap.claimablePlans) {
-      const grants = plan.entitlements
-        .map((e) => `${e.showName || plan.name}: ${(e.grantUnits ?? 0).toLocaleString("en-US")} ${e.unitType}`)
-        .join("; ");
-      console.log(`  claimable: ${plan.name}${grants ? ` (${grants})` : ""}`);
-    }
-    for (const err of snap.errors) console.error(`  ⚠ ${err}`);
-    if (snap.errors.length > 0) process.exitCode = 1;
-  } catch (err) {
-    console.error(`quota query failed: ${(err as Error).message}`);
-    process.exit(1);
-  }
-}
-
-/** `YYYY-MM-DD HH:mm` local time; `expiresAt` may be seconds or milliseconds. */
-function fmtQuotaExpiry(expiresAt: number): string {
-  const d = new Date(expiresAt > 1e12 ? expiresAt : expiresAt * 1000);
-  if (Number.isNaN(d.getTime())) return String(expiresAt);
-  const pad = (n: number): string => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-async function authLogin(args: string[]): Promise<void> {
-  const provider = args[0] as ProviderId | undefined;
-  const importMode = args.includes("--import");
-  // Headless paste login: --paste flag or ZCODE_OAUTH_PASTE=1 (docker-friendly).
-  const pasteMode =
-    args.includes("--paste") || /^(1|true|yes)$/i.test(process.env.ZCODE_OAUTH_PASTE ?? "");
-
-  if (!provider || (provider !== "zai" && provider !== "bigmodel")) {
-    console.error("Usage: zcode-proxy auth login <zai|bigmodel> [--import] [--paste]");
-    process.exit(1);
-  }
-  if (pasteMode && provider !== "bigmodel") {
-    console.error("--paste applies to the bigmodel auth-code flow only.");
-    console.error("zai login is server-mediated (no localhost callback) and already works headless.");
-    process.exit(1);
-  }
-
-  ensureConfigWithDeviceMid();
-
-  const mode = importMode ? "(import)" : pasteMode ? "(OAuth, paste)" : "(OAuth)";
-  console.log(`Logging in: ${provider} ${mode}\n`);
-
-  let cred: Credential;
-
-  if (importMode) {
-    cred = importFromZCodeConfig(provider);
-  } else {
-    const { accessToken, userId, jwt } = await runOAuth(provider, pasteMode);
-    console.log("\nResolving API key...");
-    const resolver = new KeyResolver();
-    cred = await resolver.resolveCodingPlanCredential(accessToken, provider, userId);
-    if (jwt) cred.jwt = jwt;
-  }
-
-  await saveCredential(cred);
-  console.log(`\nLogged in as ${provider}.`);
-  console.log(`  API Key: ${cred.apiKey.substring(0, 12)}...`);
-  if (cred.userId) console.log(`  User ID: ${cred.userId}`);
-  console.log(`  Stored:  ${getStorePath()}`);
-}
-
-/**
- * Ensure config.yaml exists and carries a stable `identity.deviceMid`.
- * Creates the file from the bundled template when missing (desktop flow;
- * Android's mid comes from NodeRunner env injection instead and is never
- * written here). Returns the mid (existing or freshly generated).
- */
-function ensureConfigWithDeviceMid(): string {
-  const path = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
-  if (ensureConfigFile(path)) {
-    console.log(`Created ${path} from bundled template.`);
-  }
-  return ensureDeviceMidInConfig(path);
-}
-
-/**
- * Generate-or-reuse `identity.deviceMid` in a YAML config via targeted line
- * edit (comments preserved): fills an empty `deviceMid:` value, inserts one
- * under a block-style `identity:` key, or appends a new `identity:` block when
- * the key is absent entirely. Idempotent — an existing non-empty value is
- * returned untouched. The regexes are function-local on purpose: `main()` runs
- * synchronously at module top (before later top-level statements initialize),
- * so any module-level const this function touches would still be undefined on
- * the boot-time `serve` path.
- */
-export function ensureDeviceMidInConfig(path: string): string {
-  const deviceMidLine = /^(\s*)deviceMid:\s*(.*)$/m;
-  const identityBlockLine = /^identity:\s*$/m;
-  const raw = readFileSync(path, "utf-8");
-
-  const existing = deviceMidLine.exec(raw);
-  if (existing) {
-    const value = existing[2].trim().replace(/^"|"$/g, "");
-    if (value.length > 0) return value;
-  }
-
-  const mid = randomUUID();
-  let updated: string;
-  if (existing) {
-    updated = raw.replace(deviceMidLine, `${existing[1]}deviceMid: "${mid}"`);
-  } else if (identityBlockLine.test(raw)) {
-    updated = raw.replace(identityBlockLine, `identity:\n  deviceMid: "${mid}"`);
-  } else {
-    const block = `identity:\n  deviceMid: "${mid}"\n`;
-    updated = raw.endsWith("\n") || raw.length === 0 ? raw + block : raw + "\n" + block;
-  }
-  writeFileSync(path, updated, "utf-8");
-  console.log(`Device identity generated: ${mid.slice(0, 8)}… (stored in ${path})`);
-  return mid;
-}
-
-function authLogout(): void {
-  if (!existsSync(getStorePath())) {
-    console.log("Not logged in.");
-    return;
-  }
-  clearCredential();
-  console.log("Logged out. Credentials removed.");
-}
-
-async function authStatus(): Promise<void> {
-  const cred = await loadCredential();
-  if (!cred) {
-    console.log("Not logged in.");
-    console.log("Run: zcode-proxy auth login <zai|bigmodel>");
-    return;
-  }
-  console.log(`Logged in: ${cred.provider}`);
-  console.log(`  API Key: ${cred.apiKey.substring(0, 12)}...`);
-  console.log(`  Store:   ${getStorePath()}`);
-}
-
-async function runOAuth(provider: ProviderId, pasteMode: boolean): Promise<OAuthResult> {
-  if (provider === "bigmodel" && pasteMode) {
-    const oauth = new BigmodelOAuthClient();
-    return runPasteLogin(oauth);
-  }
-
-  // Both providers use the server-mediated poll login (ZCode 3.12.3 default):
-  // the browser never calls back here — open the URL on ANY device and the
-  // flow completes server-side while we poll.
-  const oauth = provider === "bigmodel" ? new BigmodelPollOAuthClient() : new ZaiOAuthClient();
-  const result = await oauth.authorize((url) => {
-    console.log("Open this URL to authorize (any device/browser works):\n");
-    console.log(`  ${url}\n`);
-    console.log("Waiting for authorization... (expires in 300s)\n");
-    console.log(
-      "After you authorize, the browser may report it cannot open a zcode:// link —\n" +
-        "that is expected and safe to ignore; the login completes here automatically.\n",
-    );
-    openBrowser(url);
-  });
-  return result;
-}
-
-/**
- * Headless bigmodel login (`auth login bigmodel --paste`): the localhost
- * callback server is still bound — it defines the redirect port and the
- * browser can never reach it from inside a container anyway — but instead of
- * waiting on it, the user pastes the redirected URL back. The exact
- * `started.callbackUrl` string is used BOTH as the authorize `redirect` param
- * and as the exchange `redirect_uri` (the token endpoint requires them to
- * match), so the pair stays consistent by construction.
- */
-async function runPasteLogin(oauth: BigmodelOAuthClient): Promise<OAuthResult> {
-  const started = await oauth.start();
-  try {
-    console.log(pasteLoginInstructions(started.authorizeUrl, started.callbackUrl, LOGIN_TIMEOUT_MS));
-    openBrowser(started.authorizeUrl);
-    process.stdout.write("\n" + boldIfTTY("Paste the FULL redirected URL here, then press Enter:") + "\n> ");
-    const pasted = await readPastedLine(LOGIN_TIMEOUT_MS);
-    const code = parsePastedCallbackUrl(pasted, started.state);
-    console.log("\nExchanging authorization code...");
-    const tokens = await oauth.exchangeCode(code, started.callbackUrl, started.state);
-    return { accessToken: tokens.accessToken, provider: "bigmodel", userId: tokens.userId, jwt: tokens.jwt };
-  } finally {
-    await oauth.close();
-  }
-}
-
-function importFromZCodeConfig(provider: ProviderId): Credential {
-  const configPath = join(homedir(), ".zcode", "v2", "config.json");
-  let raw: string;
-  try {
-    raw = readFileSync(configPath, "utf-8");
-  } catch {
-    console.error(`Cannot read ${configPath}.`);
-    console.error("Make sure ZCode is installed and you've logged in at least once.");
-    process.exit(1);
-  }
-
-  const config = JSON.parse(raw) as {
-    provider?: Record<string, { options?: { apiKey?: string }; enabled?: boolean }>;
-  };
-
-  const providerKey = `builtin:${provider}-coding-plan`;
-  const entry = config.provider?.[providerKey];
-  const apiKey = entry?.options?.apiKey?.trim();
-
-  if (!apiKey) {
-    console.error(`No API key for ${providerKey} in ZCode config.`);
-    process.exit(1);
-  }
-
-  const startPlanKey = `builtin:${provider}-start-plan`;
-  const jwt = config.provider?.[startPlanKey]?.options?.apiKey?.trim() || undefined;
-
-  console.log(`Imported from ${configPath}`);
-  if (jwt) console.log(`  Start-plan JWT: ${jwt.slice(0, 12)}...`);
-  return { apiKey, provider, jwt };
 }

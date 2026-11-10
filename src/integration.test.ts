@@ -6,7 +6,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config/loader.js";
-import { AuthManager } from "./auth/manager.js";
+import { brokerFor } from "./accounts/testing.js";
+import { ApiKeyManager } from "./apikeys/manager.js";
+import { memoryApiKeysStore } from "./apikeys/testing.js";
 import { startServer, type ProxyServer } from "./server/server.js";
 
 let proxyServer: ProxyServer;
@@ -14,13 +16,19 @@ let mockUpstreamServer: ReturnType<typeof Bun.serve>;
 let proxyPort: number;
 let mockPort: number;
 let capturedUpstreamBodies: string[] = [];
+/**
+ * 数据面 key 的明文。
+ *
+ * 只存 hash 的仓没法「先写死一个 key 再断言」，所以这里在 `beforeAll` 里建一把，
+ * 后续请求带它。
+ */
+let integrationKey = "";
 
 function findFreePort(): number {
   return 18000 + Math.floor(Math.random() * 1000);
 }
 
-// The former config.test.yaml fixture (removed in f6aa147) inlined as a temp
-// file so the suite stays self-contained.
+// The config fixture is inlined as a temp file so the suite stays self-contained.
 let configDir: string;
 
 function writeTestConfig(): string {
@@ -30,7 +38,7 @@ function writeTestConfig(): string {
     '  port: 19090',
     '  host: "127.0.0.1"',
     "auth:",
-    '  proxyApiKey: "test-proxy-key"',
+    "  requireKey: true",
     "provider: zai",
     "defaultModel: glm-4.6",
     "models:",
@@ -55,7 +63,7 @@ beforeAll(async () => {
       const url = new URL(req.url);
       const rawBody = await req.text();
       let parsed: { stream?: boolean; model?: string } = {};
-      try { parsed = JSON.parse(rawBody); } catch {}
+      try { parsed = JSON.parse(rawBody); } catch { parsed = {}; }
 
       if (url.pathname.includes("/v1/messages")) {
         capturedUpstreamBodies.push(rawBody);
@@ -70,7 +78,7 @@ beforeAll(async () => {
             (m) => Array.isArray(m.content) && m.content.some((b: any) => b?.type === "tool_result"),
           );
           hasToolsDefined = (parsedAny.tools?.length ?? 0) > 0;
-        } catch {}
+        } catch { /* non-JSON body keeps the probes false */ }
 
         if (hasToolResult) {
           return new Response(JSON.stringify({
@@ -133,7 +141,7 @@ beforeAll(async () => {
           };
           hasToolResult = (parsedAny.messages ?? []).some((m) => m.role === "tool");
           hasToolsDefined = (parsedAny.tools?.length ?? 0) > 0;
-        } catch {}
+        } catch { /* non-JSON body keeps the probes false */ }
 
         if (hasToolResult) {
           return new Response(JSON.stringify({
@@ -210,14 +218,24 @@ beforeAll(async () => {
   const config = loadConfig(writeTestConfig());
   config.server.port = proxyPort;
   config.server.host = "127.0.0.1";
-  config.auth.proxyApiKey = "integration-test-key";
+  config.auth.requireKey = true;
+  const apiKeys = new ApiKeyManager(memoryApiKeysStore());
+  const created = await apiKeys.create("integration-test");
+  if (!created.ok || !created.key) throw new Error("cannot create the integration test key");
+  integrationKey = created.key;
   config.providers.zai.anthropicBase = `http://127.0.0.1:${mockPort}/anthropic`;
   config.providers.zai.openaiBase = `http://127.0.0.1:${mockPort}/coding`;
 
-  const auth = new AuthManager();
-  auth.setOAuthCredential({ apiKey: "integrationTestKey", secret: "integrationTestSecret", provider: "zai" });
+  // 凭据来自 broker 解析的账号，不是进程级 AuthManager。
+  const { broker, manager } = brokerFor({
+    kind: "zhipu-account",
+    provider: "zai",
+    apiKey: "integrationTestKey",
+    secret: "integrationTestSecret",
+    identity: { targetType: "PERSONAL" , deviceMid: "test-device-mid" },
+  });
 
-  proxyServer = await startServer({ config, auth });
+  proxyServer = await startServer({ config, broker, accounts: manager, apiKeys });
 });
 
 afterAll(() => {
@@ -232,7 +250,7 @@ function proxyUrl(path: string): string {
   return `http://127.0.0.1:${proxyPort}${path}`;
 }
 function authHeader(): Record<string, string> {
-  return { "Authorization": "Bearer integration-test-key", "Content-Type": "application/json" };
+  return { "Authorization": `Bearer ${integrationKey}`, "Content-Type": "application/json" };
 }
 
 describe("integration: OpenAI clients (translated Anthropic upstream)", () => {
@@ -452,14 +470,14 @@ describe("integration: Anthropic clients (native passthrough)", () => {
 describe("integration: Models endpoint", () => {
   it("GET /v1/models returns model list", async () => {
     const resp = await fetch(proxyUrl("/v1/models"), {
-      headers: { Authorization: "Bearer integration-test-key" },
+      headers: authHeader(),
     });
     expect(resp.status).toBe(200);
     const body = await resp.json();
     expect(body.object).toBe("list");
-    // exact advertised set (was pinned in server.test.ts; consolidated to this
-    // real-socket e2e when the unit-side smoke duplicate was removed)
-    expect(body.data.map((m: { id: string }) => m.id)).toEqual(["glm-5.3", "glm-5.3-flash"]);
+    // /v1/models advertises what config.models lists (here glm-4.6 from the
+    // fixture yaml); other catalog ids still forward but are not advertised.
+    expect(body.data.map((m: { id: string }) => m.id)).toEqual(["glm-4.6"]);
     expect(body.data[0].object).toBe("model");
   });
 });
@@ -481,7 +499,7 @@ describe("integration: Auth", () => {
 describe("integration: Health", () => {
   it("GET /health returns ok", async () => {
     const resp = await fetch(proxyUrl("/health"), {
-      headers: { Authorization: "Bearer integration-test-key" },
+      headers: authHeader(),
     });
     expect(resp.status).toBe(200);
     const body = await resp.json();
@@ -492,7 +510,7 @@ describe("integration: Health", () => {
 describe("integration: Error handling", () => {
   it("unknown route returns 404", async () => {
     const resp = await fetch(proxyUrl("/unknown"), {
-      headers: { Authorization: "Bearer integration-test-key" },
+      headers: authHeader(),
     });
     expect(resp.status).toBe(404);
   });
