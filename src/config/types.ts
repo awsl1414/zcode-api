@@ -1,6 +1,9 @@
 /**
  * Configuration types for zcode-proxy.
  */
+import type { AccountsQuota } from "../accounts/quota.js";
+import type { AccountsRouting, AccountsStickiness } from "../accounts/routing.js";
+import type { ProxySpec } from "../accounts/proxies.js";
 
 /** Provider endpoint configuration (one per upstream provider). */
 export interface ProviderEndpoints {
@@ -10,41 +13,85 @@ export interface ProviderEndpoints {
   openaiBase: string;
 }
 
-/** Auth section of the proxy configuration. */
+/**
+ * 数据面鉴权（多把 API key 的校验开关）。
+ *
+ * 配置里只有一个总开关，key 本身全部在 `~/.zcode-proxy/apikeys.json`（面板 `/keys`
+ * 管理）：多把 key 各自有名称、启停与用量，这些都不是 YAML 该描述的东西。
+ */
 interface AuthConfig {
   /**
-   * Key that clients must provide to use the proxy (via `Authorization: Bearer {proxyApiKey}`).
-   * If unset, the proxy does not require client auth.
+   * 数据面要不要校验 API key。
+   *
+   * `false` = 完全放行（本机自用）。`true` = 「表里有 key 就校验，表空仍然放行」：
+   * 第一次启动还没建 key 时，`/v1/*` 必须能用，否则用户连建 key 的入口都没有
+   * （表空即放行）。
    */
-  proxyApiKey?: string;
-  /** Path to stored OAuth credentials created by `auth login`. */
-  oauthCredentialsPath?: string;
+  requireKey: boolean;
 }
+
+/**
+ * `panel` 段：面板用登录页而不是 URL 令牌鉴权，所以配置面只剩开关与绑定。
+ *
+ * 没有 `port`：面板挂在代理自己的监听上（`server.port`），Docker 里
+ * `-p 8080:8080` 一个端口就够，不需要开第二个。
+ */
+export interface PanelConfig {
+  /** 是否启动面板。`--no-panel` 覆盖本次启动（命令行优先于配置）。*/
+  enabled: boolean;
+  /**
+   * 面板接受访问的地址。空串 = 跟随 `server.host`。
+   *
+   * 填回环地址（`127.0.0.1`）时面板只接受本机请求，即使代理绑在 `0.0.0.0`：
+   * 这是「代理对外、控制面只给本机」的部署形态。
+   */
+  host: string;
+}
+
+/**
+ * What to do with the client's `anthropic-beta` header on the way upstream.
+ *
+ * - `drop` (default) — the header never reaches the wire. The official ZCode
+ *   CLI sends no beta at all unless tool search is on (header audit,
+ *   `docs/research/request-header-audit.md`), while Claude Code ships a dozen
+ *   on `/v1/messages`, two of which (`claude-code-20250219`,
+ *   `oauth-2025-04-20`) name the client — against a `User-Agent: ZCode/…`.
+ * - `allowlist` — keep only the entries listed in `ProxyIdentity.betaAllowlist`.
+ */
+export const BETA_POLICIES = ["drop", "allowlist"] as const;
+export type BetaPolicy = (typeof BETA_POLICIES)[number];
 
 /**
  * Identity headers injected on every upstream request to mimic the ZCode
  * desktop client. Mirrors the `pio` builder in the reverse-engineered bundle
  * (`_reverse/zcode.cjs`); see `_reverse/NOTEPAD.md` "How Credential is Used".
  *
- * `appVersion` is pinned in code (DEFAULT_APP_VERSION in config/loader.ts) and
- * auto-bumps with mirror snapshot updates — it has no env/YAML surface. The
- * `fio`-style printable-ASCII validation lives on in the header builder
- * (proxy/identity.ts), mirroring the bundle.
+ * `appVersion` follows the officially installed client, not our release:
+ * a manual `identity.appVersion` wins, then
+ * the version detected on this machine, then the built-in fallback in
+ * `config/loader.ts`. The `fio`-style printable-ASCII validation lives on in
+ * the header builder (proxy/identity.ts), mirroring the bundle.
  */
 export interface ProxyIdentity {
+  /** 最终生效的版本号（手动 > 探测 > 默认）。*/
   appVersion: string;
+  /** 这个值是哪来的，供设置页展示。*/
+  appVersionSource: "manual" | "detected" | "default";
+  /** 探测到时给出路径，方便用户确认读的是哪个客户端。*/
+  appVersionSourcePath?: string;
   sourceTitle: string;
   refererOrigin: string;
   /**
-   * Device identity for `X-Device-Mid` (mirrors ZCode's telemetry deviceMid:
-   * a random UUIDv4 generated ONCE and reused forever — no hardware values).
-   * Empty/undefined omits the header. Desktop: persisted in config.yaml
-   * (`ensureDeviceMidInConfig`). Android: injected via the
-   * `ZCODE_IDENTITY_DEVICE_MID` env var (NodeRunner, app-private file) — env
-   * wins over YAML. Must stay stable per anti-pattern #13; never randomize
-   * per-request.
+   * Client `anthropic-beta` handling; see `BETA_POLICIES`.
+   * Resolved by `config/loader.ts` — always present, never undefined.
    */
-  deviceMid?: string;
+  betaPolicy: BetaPolicy;
+  /**
+   * Beta values kept when `betaPolicy` is `allowlist`; ignored under `drop`.
+   * Normalized by the loader (trimmed, lowercased, deduplicated, empty entries
+   * dropped) so the matcher in `proxy/upstream.ts` can compare verbatim.
+   */
+  betaAllowlist: string[];
 }
 
 /** Local client-session inference mode for upstream session affinity. */
@@ -62,12 +109,12 @@ export interface ClientIdentityConfig {
 }
 
 /**
- * Responses-API (`/v1/responses`) configuration. When `enabled`, the proxy
- * translates Responses requests through Chat Completions to the Anthropic upstream.
+ * Responses-API (`/v1/responses`) configuration. The route is always mounted:
+ * the three inbound protocols are first-class citizens and none of them has a
+ * switch. What remains tunes the in-memory store behind
+ * `previous_response_id` continuations.
  */
 export interface ResponsesConfig {
-  /** Enable the `/v1/responses` route. Default `true`. */
-  enabled: boolean;
   /** Max stored responses (LRU). Default 1000. */
   storeMaxEntries: number;
   /** Stored-response TTL in ms. Default 24h (in-memory; cleared on restart). */
@@ -96,18 +143,11 @@ export interface McpGatewayConfig {
   upstreamOrigin: string;
 }
 
-/** Legacy hosted-tool switches (unwired) plus the active official MCP gateway. */
+/** Official plugin MCP gateway relay. */
 export interface McpConfig {
-  /** Legacy compatibility field, currently unwired. Default `true`. */
+  /** Enable the gateway plane. Default `true`. */
   enabled: boolean;
-  /** Legacy hosted-search preference; no search executor is wired. Default `true`. */
-  webSearch: boolean;
-  /** Legacy reader preference, currently unwired. Default `false`. */
-  webReader: boolean;
-  /** Legacy repository-reader preference, currently unwired. Default `false`. */
-  zread: boolean;
-  /** Official plugin-MCP gateway (`/mcp` aggregate). Separate plane from the
-   *  GLM hosted-tool fields above (those remain unwired). */
+  /** Official plugin-MCP gateway (`/mcp` aggregate). */
   gateway: McpGatewayConfig;
 }
 
@@ -147,17 +187,32 @@ export interface AsyncConfig {
 }
 
 /**
- * Manual claim ("weekend plan") — mirrors the ZCode 3.10 desktop client's
- * `manualClaimPlan` feature: periodically list claimable trial plans
- * (`GET {origin}/api/v1/zcode-plan/billing/preview`) and, when one is
- * available, claim it (`POST {origin}/api/v1/zcode-plan/billing/claim`) with
- * the OAuth JWT and an Aliyun captcha token. Claimed plans grant Start-Plan
- * style quota with delayed activation (`effective_at` / `starts_at`).
+ * Manual claim: activities are discovered at runtime from the billing preview
+ * and marketing deliveries, then claimed with the OAuth JWT and (when the
+ * campaign gate requires it) an Aliyun captcha token. `claiming` opens at
+ * `starts_at`; the granted entitlement may become usable later at
+ * `effective_at`. Both clocks matter for limited-quota campaigns.
  *
- * Requires `auth.mode: oauth` (claim uses `Authorization: Bearer ${jwt}`).
- *
- * @see _reverse/NOTEPAD.md "Manual Claim Plan" section for the protocol.
+ * `opening` tunes the short pre-start probe/burst cadence, `policy` names the
+ * sorting key used by the scheduler. `sprintWindowMs` / `sprintPollIntervalMs`
+ * tune the normal end-of-window cadence; the two mechanisms do not overlap.
+ * A hand-written `identity.appVersion` must satisfy the campaign's version floor.
  */
+export interface ClaimOpeningConfig {
+  /** Start preparing this long before `startsAt`; 0 disables preheating. Default 180000. */
+  preheatMs: number;
+  /** Feed poll cadence during preheat (floored at 1s). Default 10000. */
+  probeIntervalMs: number;
+  /** Retry cadence at `startsAt` (floored at 1s). Default 2000. */
+  burstIntervalMs: number;
+  /** Keep bursting at most this long after `startsAt`. Default 180000. */
+  burstWindowMs: number;
+  /** Deterministic phase between accounts inside the opening window. Default 200. */
+  accountStaggerMs: number;
+  /** Cap claim requests per account inside one opening window. Default 6. */
+  maxClaimsPerAccount: number;
+}
+
 export interface ClaimConfig {
   /** Enable the claim subsystem (CLI `claim` command + auto scheduler). Default `true`. */
   enabled: boolean;
@@ -169,8 +224,17 @@ export interface ClaimConfig {
   pollIntervalMs: number;
   /** Backoff after a failed claim attempt in ms. Default `600000` (10 min). */
   cooldownMs: number;
-  /** Optional `plan_id` to claim; empty string claims the highest-priority preview. Default `""`. */
-  planId: string;
+  /** Cadence and request cap around an activity's `startsAt`; `loadConfig` always fills it. */
+  opening?: ClaimOpeningConfig;
+  /** Sorting key for discovered activities; open string, not an activity-type enum. */
+  policy?: string;
+  /**
+   * 最后冲刺阈值 ms：选中目标已开始且 `endsAt - now` 落进阈值 → 按
+   * `sprintPollIntervalMs` 提频轮询。`0` = 关闭冲刺。Default `1800000` (30 min).
+   */
+  sprintWindowMs: number;
+  /** 冲刺期轮询间隔 ms。Default `60000` (1 min). */
+  sprintPollIntervalMs: number;
 }
 
 /**
@@ -203,10 +267,10 @@ export interface ClientSigningConfig {
 }
 
 /**
- * HighSpeed 加速卡（ZCode 3.15.1 HighspeedCardService 镜像，见
- * `_reverse/NOTEPAD.md` §C）。coding-plan 请求到达时懒触发抽卡
+ * HighSpeed 加速卡（ZCode 3.15.1 HighspeedCardService 镜像）。coding-plan
+ * 请求到达时懒触发抽卡
  * (`POST {origin}/api/v1/highspeed/draw`)；命中后窗口内（服务端 expires_at，
- * 设计基准 5min）的合格请求共享该卡：模型改写为卡上模型 + 鉴权替换为
+ * 实测约 5min）的合格请求共享该卡：模型改写为卡上模型 + 鉴权替换为
  * JWT 套装 + `X-Highspeed-Card-ID`，且该请求不签名（官方静态规则）。
  * task_id 复用 client-session affinity 推断。账号未灰度（503/3404）时
  * 负缓存 10min，fail-open 回普通转发。
@@ -220,6 +284,145 @@ export interface HighspeedConfig {
   models: string[];
 }
 
+/**
+ * `accounts.entries[]`：按 `label` 引用的账号策略覆盖。
+ *
+ * 优先级低于运行时覆盖、高于账号自身 policy：
+ * `RuntimeOverride > config.yaml entries[] > 账号 policy（默认值）`。
+ *
+ * 只声明调度会读的字段。账号自己能走哪些 route 是 `Account.routes`（账号属性），
+ * 由 `accounts/manager.ts` 在写入时强制（账号的六条规则）；这里不建模，避免出现
+ * 一个「能写、能校验、没人读」的伪配置。
+ */
+export interface AccountsEntryConfig {
+  /** 引用键（`Account.label`），不是 id，与 `X-ZCode-Account` 头同口径。*/
+  label: string;
+  /** 缺省 = 账号自身值（`true`）。*/
+  enabled?: boolean;
+  /** 缺省 = 账号自身值（`1`）。*/
+  weight?: number;
+  /** 缺省 = 账号自身值（`2`，风控优先的默认并发）。`0` = 软禁用。*/
+  maxConcurrency?: number;
+  /**
+   * 上游 RPM 闸（每分钟请求数上限）。缺省 = 账号自身 policy 的值；
+   * 两边都没写 = 不限。超限按 `saturated` 处理，不直接 429 上游。
+   */
+  rpmLimit?: number;
+  /**
+   * 该账号的出口代理：`accounts.proxies[].name`，或 `direct` 表示显式直连。
+   *
+   * 不写 = 继承 `accounts.risk.defaultProxy`；写 `direct` = 明确覆盖掉默认代理。
+   * 两者都必须区分开，否则「只让一个账号直连」无法表达。
+   */
+  proxy?: string;
+}
+
+/**
+ * `accounts.risk`：风控开关。当前只接 `jitterHeartbeat` 这一项，没有消费者的字段
+ * 不提前声明（那是「能写、能显示、不生效」的伪配置）。
+ *
+ * 一账号一设备指纹、session 命名空间隔离**不进配置面**：它们是代码
+ * 里的不变量，不是开关。
+ */
+export interface AccountsRisk {
+  /**
+   * R13 心跳抖动：抽卡循环（以及按同一口径接的轮询）按 `accountId` 哈希错峰并叠加
+   * ±10% 抖动，N 个账号永不同拍。默认 `true`；关掉只给排障用，同步心跳是机器特征。
+   */
+  jitterHeartbeat: boolean;
+  /**
+   * 未指定出口代理的账号走哪个代理：`accounts.proxies[].name`、
+   * `direct`，或省略（= 直连）。
+   *
+   * 优先级低于 `accounts.entries[].proxy`，高于直连：条目里写了 `direct` 就覆盖
+   * 掉这里的默认值。
+   */
+  defaultProxy?: string;
+}
+
+/** `accounts.risk` 默认值（`jitterHeartbeat` 默认 true）。*/
+export const DEFAULT_ACCOUNTS_RISK: AccountsRisk = { jitterHeartbeat: true };
+
+/**
+ * `accounts` 段。
+ *
+ * `routing` / `stickiness` / `quota` 的形状与默认值来自 `accounts/` 下的实现模块
+ * （唯一真源），这里只做配置侧的聚合，避免两处各自定义一份字段与默认值。
+ *
+ * `risk` 段的风控出口是 `defaultProxy`（命名代理表 + `entries[].proxy`，
+ * 没有进程级的「每账号一个代理」字段）。
+ */
+export interface AccountsConfig {
+  /** 权益紧迫度 / 同档内选号顺序 / 饱和行为 / 队列与全局并发上限。*/
+  routing: AccountsRouting;
+  /** 粘性表参数。表由 `accounts/stickiness.ts` 维护，这里只承载配置。*/
+  stickiness: AccountsStickiness;
+  /** 额度采样参数。缺省由 `accounts/quota.ts` 的默认值补齐。*/
+  quota: AccountsQuota;
+  /** 风控开关。*/
+  risk: AccountsRisk;
+  /** 按 label 的策略覆盖。*/
+  entries: AccountsEntryConfig[];
+  /**
+   * 出口代理表。账号条目按名字引用，改一次 URL 全部生效。
+   *
+   * 类型上可选：手写的 `ProxyConfig` 字面量（测试）不一定写这一段，
+   * 缺省 = 没有命名代理（此时 `entries[].proxy` 只能是 `direct`）。
+   */
+  proxies?: ProxySpec[];
+}
+
+/**
+ * Reasoning-effort panel override: what the proxy does with the
+ * client's own reasoning controls.
+ *
+ * - `passthrough` (default) — the request's `thinking` / `output_config`
+ *   survive untouched; the client decides.
+ * - `override` — every request is rewritten to the configured `effort` tier
+ *   before it leaves the proxy, regardless of what the client asked for.
+ *   The semantics per tier live in `provider/effort-override.ts`, which is
+ *   the single place both the record and the body rewrite consult.
+ *
+ * `effort` is inert while `mode` is `passthrough` (stored, not applied) —
+ * the panel keeps it editable-looking-but-disabled so switching modes does
+ * not lose the tier the user picked.
+ */
+export const REASONING_MODES = ["passthrough", "override"] as const;
+export type ReasoningMode = (typeof REASONING_MODES)[number];
+
+/** Panel-facing effort tiers; `"max"` exists only on the GLM-5.3 family. */
+export const REASONING_EFFORTS = ["off", "low", "high", "max"] as const;
+export type ReasoningEffortChoice = (typeof REASONING_EFFORTS)[number];
+
+export interface ReasoningConfig {
+  mode: ReasoningMode;
+  /** Applied only when `mode === "override"`. Structurally `Glm53Effort | "off"`. */
+  effort: ReasoningEffortChoice;
+}
+
+/**
+ * dump 配置：把每个上游请求的完整上下文（含请求/响应体）写进调试文件。
+ *
+ * 文件里是明文报文，风险与开关语义见 `proxy/dump.ts` 的文件头；这里只承载 YAML
+ * 的两个键。消费方是 `proxy/dump.ts`（启动时灌入进程内配置），设置页经
+ * `routes-state.ts` 读写这两个键。
+ */
+export interface DumpConfig {
+  /** 写不写 dump 文件。默认 `false`：它含完整请求体，只在排障时开。*/
+  enabled: boolean;
+  /** dump 文件路径。空串 = 存储目录下的默认文件（`<storeDir>/dump.jsonl`）。*/
+  path: string;
+}
+
+export interface LoggingConfig {
+  level: "debug" | "info" | "warn" | "error";
+  /**
+   * dump 开关。类型上可选：手写的 `ProxyConfig` 字面量（测试）不一定写
+   * 这一段；`loadConfig` 总是补齐它。省略 = 关，与 `false` 同义。
+   */
+  dump?: DumpConfig;
+}
+
 /** Top-level proxy configuration. */
 export interface ProxyConfig {
   server: {
@@ -227,18 +430,41 @@ export interface ProxyConfig {
     host: string;
   };
   auth: AuthConfig;
-  /** Active upstream provider. */
-  provider: "zai" | "bigmodel";
-  /** Which plan tier to use. "coding-plan" (default) uses direct upstream endpoints; "start-plan" routes through zcode.z.ai with JWT auth. */
-  plan: "coding-plan" | "start-plan";
-  /** Per-provider endpoint overrides. */
+  /**
+   * Web panel.
+   *
+   * The panel has no port of its own: it is mounted on the proxy's HTTP server,
+   * so one published port is enough in Docker. Access is gated by the login page
+   * (`users.json`), not by a token in the URL.
+   *
+   * Optional only so hand-built configs (tests) need not spell out a section
+   * that is on by default; `loadConfig` always fills it in, and
+   * `resolvePanelSettings` applies the same defaults when it is absent.
+   */
+  panel?: PanelConfig;
+  /**
+   * Per-family endpoint overrides.
+   *
+   * There is no process-global `provider` (which family to use) or `plan`
+   * (coding-plan vs start-plan) setting: the family
+   * is a property of the account's credential and the plan is a property of the
+   * route this request resolved to (`accounts/broker.ts`), so there is nothing
+   * process-global left to configure.
+   *
+   * What remains here is only an *endpoint* override for a family's own
+   * endpoints (self-hosted mirrors, and the test harness pointing coding-plan
+   * traffic at a local mock); `proxy/route-endpoint.ts` explains exactly which
+   * routes it may affect and why the zcode.z.ai gateway routes and the payg
+   * plane are excluded.
+   */
   providers: {
     zai: ProviderEndpoints;
     bigmodel: ProviderEndpoints;
   };
   /** Default model id used when client request omits `model`. */
   defaultModel: string;
-  /** Whitelist of allowed model ids. */
+  /** Model ids advertised in the startup output and the panel. Not a whitelist:
+   *  any other id still forwards upstream. */
   models: string[];
   /**
    * Identity headers injected upstream. Always present after `loadConfig`;
@@ -247,6 +473,16 @@ export interface ProxyConfig {
   identity: ProxyIdentity;
   /** Local client session inference for cache-affinity experiments. */
   clientIdentity: ClientIdentityConfig;
+  /**
+   * Reasoning-effort passthrough/override.
+   *
+   * Optional only so hand-built configs (tests) need not
+   * spell out a section that defaults to passthrough; `loadConfig` always
+   * fills it in. Omitted = `passthrough`, i.e. zero behavior change — the
+   * consumer (`provider/effort-override.ts`) treats `undefined` the same as
+   * `{ mode: "passthrough", effort: "high" }`.
+   */
+  reasoning?: ReasoningConfig;
   /** Responses-API (`/v1/responses`) configuration. */
   responses: ResponsesConfig;
   /** Server-controlled upstream URL remapping (ultra endpoints). */
@@ -261,7 +497,13 @@ export interface ProxyConfig {
   async: AsyncConfig;
   /** Manual claim ("weekend plan") configuration. */
   claim: ClaimConfig;
-  logging: {
-    level: "debug" | "info" | "warn" | "error";
-  };
+  /**
+   * 账号调度配置。
+   *
+   * 类型上可选是因为**手写的 `ProxyConfig` 字面量**（测试）不一定写这一段；
+   * `loadConfig` 总是补齐它。省略 = 没配策略，`accounts/broker.ts` 按默认值
+   * 默认值跑（"只导入账号、不写策略也能跑"）。
+   */
+  accounts?: AccountsConfig;
+  logging: LoggingConfig;
 }
