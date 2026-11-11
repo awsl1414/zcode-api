@@ -9,12 +9,21 @@ services:
       # Mount the directory, not config.yaml alone: accounts.json, apikeys.json,
       # users.json and policy.json (plus the runtime-written requests.jsonl,
       # activities.jsonl and control.port) are written next to it, so backing up or
-      # moving this one directory carries the whole install. Create it first
-      # (`mkdir -p data`): Docker makes a missing bind mount as root while the
-      # container runs as uid 1000, and the first start would fail to write
-      # config.yaml.
+      # moving this one directory carries the whole install.
+      # The directory may not exist yet; the entrypoint creates it and gives it
+      # to PUID:PGID so the unprivileged proxy can write config.yaml.
       - ./data:/data
     environment:
+      # The uid/gid the proxy process runs as. The entrypoint starts as root,
+      # takes ownership of ./data and the captcha cache in HOME, then drops to
+      # these ids. Defaults to 1000:1000, which is the image's `bun` user.
+      # Match the host directory to them only if you want to avoid the chown,
+      # for example `sudo chown -R 1001:1001 data` for PUID=1001.
+      # To keep the container off root, delete these two and add
+      # `user: "1001:1001"` to the service instead; that skips the ownership
+      # fix and needs ./data to be writable already.
+      PUID: "1000"
+      PGID: "1000"
       # Encryption seed for the account, API-key and user stores. Pick one
       # random string now and never change it: a different seed cannot decrypt
       # the files it wrote, so every imported account would have to be added

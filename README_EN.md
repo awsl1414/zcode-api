@@ -119,13 +119,24 @@ curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/jso
 <details>
 <summary><b>Docker Deployment</b></summary>
 
-The image is multi-arch (amd64 / arm64) and runs as the `bun` user. Its multi-stage build ships only the application bundle and captcha worker, with all features retained and no `node_modules`, sources, tests, or additional build tools in the runtime layer. The panel is mounted on the proxy's own listener, so publishing `8080` is enough.
+The image is multi-arch (amd64 / arm64), runs as uid 1000 (the image's `bun` user) by default, and accepts any uid/gid. Its multi-stage build ships only the application bundle and captcha worker, with all features retained and no `node_modules`, sources, tests, or additional build tools in the runtime layer. The panel is mounted on the proxy's own listener, so publishing `8080` is enough.
 
 ```bash
-mkdir -p data                        # Docker creates a missing mount dir as root; the container runs as uid 1000
 docker compose up -d                  # docker-compose.yml in the repo root; replace the seed first
 docker compose logs zcode-proxy       # find the admin password line
 ```
+
+The container starts as root; the entrypoint gives `/data` and `/home/bun` to `PUID:PGID`, then drops privileges for the proxy itself. The default is `1000:1000` (the image's `bun` user); set the two variables to use another uid:
+
+```bash
+docker run -d --name zcode-proxy -p 8080:8080 \
+  -v "$(pwd)/data:/data" \
+  -e PUID=1001 -e PGID=1001 \
+  -e ZCODE_PROXY_CREDENTIAL_SECRET="a-fixed-random-string-only-you-know" \
+  ghcr.io/awsl1414/zcode-proxy:latest
+```
+
+To keep the container off root entirely, use `--user 1001:1001` (`user:` in compose) instead. That route does not change ownership, so `./data` must already be writable by that uid or startup fails; `PUID`/`PGID` are then ignored with a one-line notice. An `/home/bun` this uid cannot write only disables the captcha script disk cache, so each start re-downloads it; solving still works. Neither route needs an `/etc/passwd` entry for the uid. Do not change `HOME`: the default store encryption seed is derived from the home path, so a different value makes existing accounts and keys undecryptable.
 
 The first start looks like this (the password is printed once; after you change it in the panel it never appears again):
 
@@ -155,7 +166,6 @@ Open `http://<host>:8080/`, sign in as `admin` with that password, then:
 No compose file needed either:
 
 ```bash
-mkdir -p data
 docker run -d --name zcode-proxy -p 8080:8080 \
   -v "$(pwd)/data:/data" \
   -e ZCODE_PROXY_CREDENTIAL_SECRET="a-fixed-random-string-only-you-know" \
@@ -173,6 +183,9 @@ services:
     volumes:
       - ./data:/data
     environment:
+      # uid/gid of the proxy process; defaults to 1000:1000.
+      PUID: "1000"
+      PGID: "1000"
       # Encryption seed for the account files. Changing it loses every imported account.
       ZCODE_PROXY_CREDENTIAL_SECRET: "replace-with-a-fixed-random-string"
     restart: unless-stopped
@@ -180,7 +193,7 @@ services:
 
 `./data` is the whole install's storage directory: `config.yaml` (written on first start), `accounts.json`, `apikeys.json`, `users.json`, `policy.json`, plus the runtime-written `requests.jsonl` (request log), `activities.jsonl` (claim ledger) and `control.port`. Backups, machine moves and migrations copy this one directory.
 
-Create the mount directory first: when it does not exist, Docker makes it as root while the container runs as uid 1000 (the image's `bun` user), so writing `config.yaml` fails with a permission error. If the host's first user is not uid 1000, use `mkdir -p data && sudo chown 1000:1000 data`.
+Files inside `./data` are owned by `PUID:PGID`. If you back it up with a tool that preserves ownership, such as `rsync`, chown the host directory to the same ids first.
 
 `ZCODE_PROXY_CREDENTIAL_SECRET` is the encryption seed for those files. Set it once and never change it: a different value makes every imported account and every existing key unreadable. It does not live in `config.yaml`, because that would store the secret in plaintext in the config file.
 
@@ -200,6 +213,7 @@ The env vars the runtime reads are none of them user configuration:
 | `ZCODE_PROXY_CONFIG` | `config.yaml` | Config file path (a start argument: the YAML is not known yet; `/data/config.yaml` in the image) |
 | `ZCODE_PROXY_STORE_DIR` | `~/.zcode-proxy` | Storage directory: accounts, API keys, control-surface users and account policies all land here (`/data` in the image) |
 | `ZCODE_PROXY_CREDENTIAL_SECRET` | machine-specific | Encryption seed for those store files (fix it when migrating across machines / using Docker) |
+| `PUID` / `PGID` | `1000` / `1000` | Read by the image entrypoint only: the uid/gid the proxy drops to inside the container |
 | `ZCODE_LOG_FORMAT` | desktop table | Set to `compact` for single-line logs (narrow screens and `docker logs`; the image already sets it) |
 | `ZCODE_ENV` | production | `test` reports the client release channel as test; irrelevant on desktop |
 | `ZCODE_UPDATE_CHECK` / `ZCODE_UPDATE_SKIP` | on / none | Disable the "new version" check / comma-separated tags to mute, e.g. `v5.0.0,v5.0.1` |

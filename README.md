@@ -118,13 +118,24 @@ curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/jso
 <details>
 <summary><b>Docker 部署</b></summary>
 
-镜像多架构（amd64 / arm64），以 `bun` 用户运行。多阶段构建后的运行层仅带应用 bundle 和验证码 worker，不带 `node_modules`、源码、测试或额外构建工具，保留完整功能。面板挂在代理自己的监听上，一个端口服务所有，所以只映射 `8080`。
+镜像多架构（amd64 / arm64），默认以 uid 1000（镜像里的 `bun` 用户）运行，可以改成任意 uid/gid。多阶段构建后的运行层仅带应用 bundle 和验证码 worker，不带 `node_modules`、源码、测试或额外构建工具，保留完整功能。面板挂在代理自己的监听上，一个端口服务所有，所以只映射 `8080`。
 
 ```bash
-mkdir -p data                        # Docker 会以 root 创建不存在的挂载目录，而容器以 uid 1000 运行
 docker compose up -d                  # 仓库根目录的 docker-compose.yml，先把种子换成固定随机串
 docker compose logs zcode-proxy       # 找管理员密码那一行
 ```
+
+容器以 root 启动，入口脚本把 `/data` 与 `/home/bun` 的属主改成 `PUID:PGID`，再用 `su-exec` 降权执行代理本体。默认 `1000:1000`（镜像里的 `bun` 用户），要换成别的 uid 就设这两个变量：
+
+```bash
+docker run -d --name zcode-proxy -p 8080:8080 \
+  -v "$(pwd)/data:/data" \
+  -e PUID=1001 -e PGID=1001 \
+  -e ZCODE_PROXY_CREDENTIAL_SECRET="一串只有你知道的固定随机串" \
+  ghcr.io/awsl1414/zcode-proxy:latest
+```
+
+不想让容器以 root 启动也行：改用 `--user 1001:1001`（compose 里写 `user:`）。这条路不改属主，要求 `./data` 已经对该 uid 可写，否则启动会失败；此时再带 `PUID`/`PGID` 会被忽略并打一行提示。`/home/bun` 不归该 uid 时验证码磁盘缓存写不进去，不影响求解，只是每次启动重新下载。两种方式都不要求 `/etc/passwd` 里有对应 uid 的记录。不要改 `HOME`：默认的存储加密种子由 HOME 路径派生，换了它已存的账号与 key 就解不开了。
 
 首次启动的日志长这样（密码只打印这一次，在面板里改过就不会再出现）：
 
@@ -154,7 +165,6 @@ panel: http://127.0.0.1:8080/
 不想写 compose 文件也可以：
 
 ```bash
-mkdir -p data
 docker run -d --name zcode-proxy -p 8080:8080 \
   -v "$(pwd)/data:/data" \
   -e ZCODE_PROXY_CREDENTIAL_SECRET="一串只有你知道的固定随机串" \
@@ -172,6 +182,9 @@ services:
     volumes:
       - ./data:/data
     environment:
+      # 代理进程的 uid/gid，默认 1000:1000
+      PUID: "1000"
+      PGID: "1000"
       # 账号文件的加密种子。改它等于丢失所有已导入的账号。
       ZCODE_PROXY_CREDENTIAL_SECRET: "换成一串固定的随机字符"
     restart: unless-stopped
@@ -179,7 +192,7 @@ services:
 
 `./data` 是整个安装的存储目录：`config.yaml`（首次启动自动生成）、`accounts.json`、`apikeys.json`、`users.json`、`policy.json`，以及运行期写出的 `requests.jsonl`（请求记录）、`activities.jsonl`（抢活动台账）与 `control.port`。备份、换机器、迁移都只拷这一个目录。
 
-挂载目录要先建：不存在时由 Docker 以 root 建，而容器以 uid 1000（镜像里的 `bun` 用户）运行，写 `config.yaml` 会直接报权限错误。宿主机第一个用户不是 uid 1000 时，改成 `mkdir -p data && sudo chown 1000:1000 data`。
+`./data` 里文件的属主是 `PUID:PGID`。用 `rsync` 之类按属主处理的工具备份时，先把宿主机目录 chown 到同一组 id。
 
 `ZCODE_PROXY_CREDENTIAL_SECRET` 是这几个文件的加密种子，定了就别改：换一个值等于让已导入的账号与新写的 key 全部解不开。它不进 `config.yaml`，因为那等于把密钥明文存进配置文件。
 
@@ -199,6 +212,7 @@ services:
 | `ZCODE_PROXY_CONFIG` | `config.yaml` | 配置文件路径（启动参数，此时还不知道 YAML 在哪；镜像里是 `/data/config.yaml`） |
 | `ZCODE_PROXY_STORE_DIR` | `~/.zcode-proxy` | 存储目录：账号、API key、控制面用户、账号策略都写在这里（镜像里是 `/data`） |
 | `ZCODE_PROXY_CREDENTIAL_SECRET` | 机器相关 | 那几个存储文件的加密种子（跨机器迁移/Docker 时需要固定它） |
+| `PUID` / `PGID` | `1000` / `1000` | 仅镜像入口脚本读：容器降权后的 uid/gid，见上文 Docker 部署 |
 | `ZCODE_LOG_FORMAT` | 桌面表格 | 设为 `compact` 可得单行日志（适合窄屏与 `docker logs`，镜像里默认就是） |
 | `ZCODE_ENV` | 生产 | 设为 `test` 时把客户端的 release channel 报成 test；桌面场景不用管 |
 | `ZCODE_UPDATE_CHECK` / `ZCODE_UPDATE_SKIP` | 开 / 无 | 关掉「有新版」检查 / 逗号分隔要忽略的版本，如 `v5.0.0,v5.0.1` |
